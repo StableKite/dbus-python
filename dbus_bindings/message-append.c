@@ -924,7 +924,8 @@ _message_iter_append_variant(DBusMessageIter *appender, PyObject *obj)
                                               : &(variant_iters[i-1]));
 
             DBG("Closing VARIANT container %p inside %p", child, parent);
-            if (!dbus_message_iter_close_container(parent, child)) {
+            if (!dbuspy_message_iter_close_container(parent, child,
+                                                     (ret == 0))) {
                 PyErr_NoMemory();
                 ret = -1;
                 goto out;
