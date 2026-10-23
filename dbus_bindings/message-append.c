@@ -829,7 +829,7 @@ _message_iter_append_string_as_byte_array(DBusMessageIter *appender,
         ret = -1;
     }
     DBG("%s", "Closing ARRAY container");
-    if (!dbus_message_iter_close_container(appender, &sub)) {
+    if (!dbuspy_message_iter_close_container(appender, &sub, (ret == 0))) {
         PyErr_NoMemory();
         return -1;
     }
