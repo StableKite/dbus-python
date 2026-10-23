@@ -1,7 +1,17 @@
 dbus Python Bindings 1.5.1 (UNRELEASED)
 =======================================
 
-...
+Fixes:
+
+* Fix a memory leak when freeing UnixFd objects
+  (dbus-python#62, Nieves Montero Fernandez)
+
+* Avoid libdbus assertion failures in some configurations if attempting
+  to write an invalid item into a variant, for example a non-UTF-8 bytestring
+  (dbus-python#60, Nieves Montero Fernandez)
+
+* Be more consistent about how containers are closed, to avoid mistakes
+  similar to dbus-python#60 (Simon McVittie)
 
 dbus Python Bindings 1.5.0 (2026-09-27)
 =======================================
