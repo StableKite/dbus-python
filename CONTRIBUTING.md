@@ -216,5 +216,5 @@ twine upload dist/dbus_python-${version}.tar.gz
 #### Post-release steps
 
 * Announce the new release to the D-Bus mailing list
-* Update `NEWS` and the version number in `configure.ac` and `meson.build`,
+* Update `NEWS` and the version number in `meson.build`,
   and commit them
