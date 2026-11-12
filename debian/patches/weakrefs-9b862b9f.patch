@@ -1,0 +1,139 @@
+From 9b862b9fa6953aedc608813bc722f19f536d4fb5 Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@collabora.com>
+Date: Sat, 19 Sep 2026 17:24:21 +0100
+Subject: [PATCH] Revert "bindings: Use Py_TPFLAGS_MANAGED_WEAKREF if
+ available"
+
+This implementation of weak references was incomplete, and causes
+crashes in Python 3.15 prereleases.
+
+This reverts commit ebecd1747c382a57ad8e47d0e32112cdbd454b40.
+
+Signed-off-by: Simon McVittie <smcv@collabora.com>
+---
+ dbus_bindings/conn-internal.h |  2 --
+ dbus_bindings/conn.c          | 14 +-------------
+ dbus_bindings/server.c        | 16 +---------------
+ 3 files changed, 2 insertions(+), 30 deletions(-)
+
+diff --git a/dbus_bindings/conn-internal.h b/dbus_bindings/conn-internal.h
+index ae47816..d333d27 100644
+--- a/dbus_bindings/conn-internal.h
++++ b/dbus_bindings/conn-internal.h
+@@ -42,10 +42,8 @@ typedef struct {
+      */
+     PyObject *object_paths;
+ 
+-#if !DBUSPY_PY_VERSION_AT_LEAST(3, 12, 0, 0)
+     /* Weak-references list to make Connections weakly referenceable */
+     PyObject *weaklist;
+-#endif
+ 
+     dbus_bool_t has_mainloop;
+ } Connection;
+diff --git a/dbus_bindings/conn.c b/dbus_bindings/conn.c
+index 54efc49..4aa0865 100644
+--- a/dbus_bindings/conn.c
++++ b/dbus_bindings/conn.c
+@@ -238,9 +238,7 @@ DBusPyConnection_NewConsumingDBusConnection(PyTypeObject *cls,
+     self->has_mainloop = (mainloop != Py_None);
+     self->conn = NULL;
+     self->filters = PyList_New(0);
+-#if !DBUSPY_PY_VERSION_AT_LEAST(3, 12, 0, 0)
+     self->weaklist = NULL;
+-#endif
+     if (!self->filters) goto err;
+     self->object_paths = PyDict_New();
+     if (!self->object_paths) goto err;
+@@ -394,10 +392,7 @@ static void Connection_tp_dealloc(Connection *self)
+     /* avoid clobbering any pending exception */
+     PyErr_Fetch(&et, &ev, &etb);
+ 
+-#if !DBUSPY_PY_VERSION_AT_LEAST(3, 12, 0, 0)
+-    if (self->weaklist)
+-#endif
+-    {
++    if (self->weaklist) {
+         PyObject_ClearWeakRefs((PyObject *)self);
+     }
+ 
+@@ -460,19 +455,12 @@ PyTypeObject DBusPyConnection_Type = {
+     0,                      /*tp_getattro*/
+     0,                      /*tp_setattro*/
+     0,                      /*tp_as_buffer*/
+-#if DBUSPY_PY_VERSION_AT_LEAST(3, 12, 0, 0)
+-    Py_TPFLAGS_MANAGED_WEAKREF |
+-#endif
+     Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+     Connection_tp_doc,      /*tp_doc*/
+     0,                      /*tp_traverse*/
+     0,                      /*tp_clear*/
+     0,                      /*tp_richcompare*/
+-#if DBUSPY_PY_VERSION_AT_LEAST(3, 12, 0, 0)
+-    0,                      /*tp_weaklistoffset*/
+-#else
+     offsetof(Connection, weaklist),   /*tp_weaklistoffset*/
+-#endif
+     0,                      /*tp_iter*/
+     0,                      /*tp_iternext*/
+     DBusPyConnection_tp_methods,  /*tp_methods*/
+diff --git a/dbus_bindings/server.c b/dbus_bindings/server.c
+index d250a1d..3591eac 100644
+--- a/dbus_bindings/server.c
++++ b/dbus_bindings/server.c
+@@ -38,10 +38,8 @@ typedef struct {
+     /* The Connection subtype for which this Server is a factory */
+     PyObject *conn_class;
+ 
+-#if !DBUSPY_PY_VERSION_AT_LEAST(3, 12, 0, 0)
+     /* Weak-references list to make server weakly referenceable */
+     PyObject *weaklist;
+-#endif
+ 
+     PyObject *mainloop;
+ } Server;
+@@ -425,9 +423,7 @@ Server_tp_new(PyTypeObject *cls, PyObject *args, PyObject *kwargs)
+         return NULL;
+     }
+ 
+-#if !DBUSPY_PY_VERSION_AT_LEAST(3, 12, 0, 0)
+     ((Server *)self)->weaklist = NULL;
+-#endif
+     TRACE(self);
+ 
+     return self;
+@@ -442,10 +438,7 @@ static void Server_tp_dealloc(Server *self)
+     /* avoid clobbering any pending exception */
+     PyErr_Fetch(&et, &ev, &etb);
+ 
+-#if !DBUSPY_PY_VERSION_AT_LEAST(3, 12, 0, 0)
+-    if (self->weaklist)
+-#endif
+-    {
++    if (self->weaklist) {
+         PyObject_ClearWeakRefs((PyObject *)self);
+     }
+ 
+@@ -577,19 +570,12 @@ PyTypeObject DBusPyServer_Type = {
+     0,                      /*tp_getattro*/
+     0,                      /*tp_setattro*/
+     0,                      /*tp_as_buffer*/
+-#if DBUSPY_PY_VERSION_AT_LEAST(3, 12, 0, 0)
+-    Py_TPFLAGS_MANAGED_WEAKREF |
+-#endif
+     Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+     Server_tp_doc,          /*tp_doc*/
+     0,                      /*tp_traverse*/
+     0,                      /*tp_clear*/
+     0,                      /*tp_richcompare*/
+-#if DBUSPY_PY_VERSION_AT_LEAST(3, 12, 0, 0)
+-    0,                      /*tp_weaklistoffset*/
+-#else
+     offsetof(Server, weaklist),   /*tp_weaklistoffset*/
+-#endif
+     0,                      /*tp_iter*/
+     0,                      /*tp_iternext*/
+     DBusPyServer_tp_methods,/*tp_methods*/
+-- 
+2.43.0
+
