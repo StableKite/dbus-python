@@ -1,0 +1,2 @@
+debian/tmp-indep/usr/include/dbus-1.0/dbus/dbus-python.h usr/include/dbus-1.0/dbus
+debian/tmp-indep/usr/lib/pkgconfig/dbus-python.pc usr/share/pkgconfig

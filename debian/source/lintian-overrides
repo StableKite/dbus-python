@@ -1,0 +1,4 @@
+# We currently build using Meson directly, not pyproject
+missing-prerequisite-for-pyproject-backend mesonpy (*) [pyproject.toml:*]
+# We no longer run setup.py, and d/clean deletes it
+uses-deprecated-python-stdlib distutils (*) [setup.py:*]

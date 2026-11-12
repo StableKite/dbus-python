@@ -1,0 +1,41 @@
+#!/bin/sh
+
+# Verify that third-party main loop integration, as provided by Qt
+# and E, can be built against this dbus-python. We simulate a third-party
+# main loop by copying the one for dbus-glib from this source tree.
+
+exec 2>&1
+set -e
+set -x
+
+test_build () {
+	PYTHON="$1"
+
+	mkdir "$AUTOPKGTEST_TMP/$PYTHON"
+	# provide some cunningly disguised main-loop glue
+	sed \
+		-e 's/dbus_glib/dbus_test/g' \
+		< dbus_glib_bindings/module.c \
+		> "$AUTOPKGTEST_TMP/$PYTHON/module.c"
+	cp -a subprojects/dbus-gmain "$AUTOPKGTEST_TMP/$PYTHON/"
+
+	( cd "$AUTOPKGTEST_TMP/$PYTHON" && ${CC:-cc} \
+		-Wall -Wextra -Wno-error \
+		-Wno-unused-parameter -Wno-error=unused-parameter \
+		-Wno-missing-field-initializers \
+		-Wno-error=missing-field-initializers \
+		-fPIC -shared \
+		-o _dbus_test_bindings$(${PYTHON}-config --extension-suffix) \
+		-D'DBUS_GMAIN_FUNCTION_NAME(name)=_dbus_py_glib_##name' \
+		-Idbus-gmain module.c dbus-gmain/dbus-gmain.c \
+		$(${PYTHON}-config --cflags --libs) \
+		$(pkg-config --cflags --libs dbus-python glib-2.0) )
+
+	PYTHONPATH="$AUTOPKGTEST_TMP/$PYTHON" $PYTHON -c \
+		"from _dbus_test_bindings import DBusGMainLoop"
+}
+
+for p in python3 $(py3versions -s); do
+	test_build "$p"
+	test_build "$p-dbg"
+done

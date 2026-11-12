@@ -1,0 +1,9 @@
+Document: python-dbus-doc
+Title: D-Bus Python bindings
+Author: Simon McVittie
+Abstract: API documentation for dbus-python
+Section: Programming/Python
+
+Format: HTML
+Index: /usr/share/doc/python-dbus-doc/html/index.html
+Files: /usr/share/doc/python-dbus-doc/html/*.html

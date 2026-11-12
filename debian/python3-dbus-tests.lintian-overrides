@@ -1,0 +1,7 @@
+# the protocol is called D-Bus, but the binding is called dbus, and we are
+# careful to name both correctly
+python3-dbus-tests: capitalization-error-in-description dbus D-Bus
+python3-dbus-tests: capitalization-in-override-comment capitalization-*
+
+# we are deliberately using a specific python3.x version here
+python3-dbus-tests: unusual-interpreter /usr/bin/python3.* [usr/libexec/installed-tests/dbus-python/python3.*/test/*.py]

@@ -1,0 +1,7 @@
+#!/bin/sh
+exec 2>&1
+set -e
+set -x
+exec dbus-run-session -- timeout 600s gnome-desktop-testing-runner \
+	--report-directory="$AUTOPKGTEST_ARTIFACTS" \
+	dbus-python/python3

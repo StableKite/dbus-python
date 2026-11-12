@@ -1,0 +1,5 @@
+aclocal.m4
+configure
+debian/tmp-indep/
+m4/ax_python_devel.m4
+setup.py

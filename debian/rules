@@ -1,0 +1,147 @@
+#!/usr/bin/make -f
+# Copyright © 2002,2003 Colin Walters <walters@verbum.org>
+# Copyright © 2003 Daniel Stone <daniels@debian.org>
+# Copyright © 2006 Sjoerd Simons <sjoerd@debian.org>
+# Copyright © 2012 Collabora Ltd.
+
+binaries := $(shell dh_listpackages)
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+bindnow
+export DEB_PYTHON_INSTALL_LAYOUT = deb
+export LANGUAGE=C.UTF-8
+export LC_ALL=C.UTF-8
+unexport LANG
+unexport LC_MESSAGES
+
+include /usr/share/dpkg/default.mk
+
+PYTHON3 := $(shell py3versions --requested --version debian/control)
+PYDEFAULTVER := $(shell py3versions --default --version)
+
+FLAVOURS := $(PYTHON3)
+
+%:
+	dh $@ $(DH_ADDONS) --buildsystem=meson
+build binary %-indep: DH_ADDONS=--with=sphinxdoc
+
+override_dh_autoreconf:
+	:
+
+override_dh_auto_configure-arch:
+	set -e; for x in $(FLAVOURS); do \
+		dh_auto_configure \
+			--builddirectory=build-$$x \
+			-- \
+			-Dpython=/usr/bin/python$$x \
+			-Ddoc=disabled \
+			-Dinstalled_tests=true \
+			-Dinstalled_tests_subdir=python$$x \
+			--libdir=/usr/lib \
+			; \
+	done
+override_dh_auto_configure-indep:
+	dh_auto_configure \
+		--builddirectory=build-indep \
+		-- \
+		-Dpython=/usr/bin/python3 \
+		--libdir=/usr/lib \
+		-Dinstalled_tests=false \
+		-Ddoc=enabled \
+		${NULL}
+
+override_dh_auto_build-arch:
+	set -e; for x in $(FLAVOURS); do \
+		PYTHON=/usr/bin/python$$x \
+		dh_auto_build \
+			--arch \
+			--builddirectory=build-$$x \
+			-- \
+			$(NULL); \
+	done
+override_dh_auto_build-indep:
+	PYTHON=/usr/bin/python3 dh_auto_build --indep --builddirectory=build-indep
+
+override_dh_auto_test-arch:
+	set -e; for x in $(PYTHON3); do \
+		LC_ALL=C.UTF-8 \
+		PYTHON=/usr/bin/python$$x \
+		VERBOSE=1 \
+		dh_auto_test \
+			--no-parallel \
+			--arch \
+			--builddirectory=build-$$x \
+			-- \
+			--timeout-multiplier 3 \
+			; \
+	done
+override_dh_auto_test-indep:
+	:
+
+override_dh_auto_install-arch:
+	set -e; for x in $(PYTHON3); do \
+		PYTHON=/usr/bin/python$$x \
+		dh_auto_install \
+			--arch \
+			--builddirectory=build-$$x \
+			--destdir=debian/tmp \
+			-- \
+			; \
+		mv debian/tmp/usr/libexec/installed-tests/dbus-python/python$$x/test/*.so \
+			debian/tmp/usr/lib/python3/dist-packages/; \
+	done
+	install -d debian/tmp/usr/lib/python3/dist-packages/dbus_python-${DEB_VERSION_UPSTREAM}.egg-info
+	install -m644 dbus_python.egg-info/PKG-INFO debian/tmp/usr/lib/python3/dist-packages/dbus_python-${DEB_VERSION_UPSTREAM}.egg-info/
+	install -m644 dbus_python.egg-info/dependency_links.txt debian/tmp/usr/lib/python3/dist-packages/dbus_python-${DEB_VERSION_UPSTREAM}.egg-info/
+	install -m644 dbus_python.egg-info/top_level.txt debian/tmp/usr/lib/python3/dist-packages/dbus_python-${DEB_VERSION_UPSTREAM}.egg-info/
+	touch debian/tmp/usr/lib/python3/dist-packages/dbus_python-${DEB_VERSION_UPSTREAM}.egg-info/not-zip-safe
+
+# debhelper >= 13.4 makes all of /usr/libexec executable, which is not
+# quite right for installed-tests
+override_dh_fixperms-arch:
+	dh_fixperms -a -Xusr/libexec/installed-tests
+	chmod --recursive --changes a+rX,u+w,og-w debian/python3-dbus-tests/usr/libexec/installed-tests
+
+override_dh_auto_install-indep:
+	dh_auto_install \
+		--indep \
+		--builddirectory=build-indep \
+		--destdir=debian/tmp-indep \
+		$(NULL)
+
+override_dh_install:
+	rm -fr debian/tmp/usr/include
+	rm -fr debian/tmp/usr/lib/pkgconfig
+	rm -fr debian/tmp/usr/share/doc/dbus-python
+	find debian/tmp -name '*.py[co]' -print0 | xargs -0 rm -f
+	find debian/tmp -name '*.la' -print0 | xargs -0 rm -f
+	dh_install
+
+override_dh_installchangelogs:
+	dh_installchangelogs -XChangeLog
+
+override_dh_installexamples:
+	dh_installexamples --doc-main-package=python-dbus-doc -ppython-dbus-doc
+	dh_installexamples --remaining-packages
+
+override_dh_installdocs:
+	dh_installdocs --doc-main-package=python-dbus-doc -ppython-dbus-doc
+	dh_installdocs --doc-main-package=python3-dbus -ppython3-dbus
+	dh_installdocs --remaining-packages
+
+override_dh_sphinxdoc-indep:
+	dh_sphinxdoc /usr/share/doc/python-dbus-doc/html
+
+override_dh_auto_clean:
+	dh_auto_clean
+	rm -Rf build-* install-3*
+	find . -name '*.py[co]' -print0 | xargs -0 rm -f
+
+override_dh_missing:
+	dh_missing --fail-missing
+
+override_dh_python3:
+	dh_python3
+	set -e; for x in $(PYTHON3); do \
+		dh_python3 --shebang="/usr/bin/python$$x" \
+			/usr/libexec/installed-tests/dbus-python/python$$x; \
+	done
