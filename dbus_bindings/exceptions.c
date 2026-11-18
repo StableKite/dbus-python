@@ -28,52 +28,73 @@
 #include "dbus_bindings-internal.h"
 
 static PyObject *imported_dbus_exception = NULL;
+#ifdef Py_GIL_DISABLED
+static PyMutex imported_dbus_exception_mutex;
+#endif
 
-static dbus_bool_t
-import_exception(void)
+/* Return the cached, process-lifetime reference to DBusException. */
+static PyObject *
+get_dbus_exception(void)
 {
-    PyObject *name;
-    PyObject *exceptions;
+    PyObject *exception;
+    PyObject *module;
+    PyObject *cached;
 
-    if (imported_dbus_exception != NULL) {
-        return TRUE;
-    }
+#ifdef Py_GIL_DISABLED
+    PyMutex_Lock(&imported_dbus_exception_mutex);
+#endif
+    exception = imported_dbus_exception;
+#ifdef Py_GIL_DISABLED
+    PyMutex_Unlock(&imported_dbus_exception_mutex);
+#endif
+    if (exception != NULL)
+        return exception;
 
-    name = PyUnicode_FromString("dbus.exceptions");
-    if (name == NULL) {
-        return FALSE;
-    }
-    exceptions = PyImport_Import(name);
-    Py_CLEAR(name);
-    if (exceptions == NULL) {
-        return FALSE;
-    }
-    imported_dbus_exception = PyObject_GetAttrString(exceptions,
-                                                     "DBusException");
-    Py_CLEAR(exceptions);
+    /* Importing and looking up the attribute can execute Python code. */
+    module = PyImport_ImportModule("dbus.exceptions");
+    if (module == NULL)
+        return NULL;
+    exception = PyObject_GetAttrString(module, "DBusException");
+    Py_DECREF(module);
+    if (exception == NULL)
+        return NULL;
 
-    return (imported_dbus_exception != NULL);
+#ifdef Py_GIL_DISABLED
+    PyMutex_Lock(&imported_dbus_exception_mutex);
+#endif
+    if (imported_dbus_exception == NULL) {
+        Py_INCREF(exception);
+        imported_dbus_exception = exception;
+    }
+    cached = imported_dbus_exception;
+#ifdef Py_GIL_DISABLED
+    PyMutex_Unlock(&imported_dbus_exception_mutex);
+#endif
+    Py_DECREF(exception);
+    return cached;
 }
 
 PyObject *
 DBusPyException_SetString(const char *msg)
 {
-    if (imported_dbus_exception != NULL || import_exception()) {
-        PyErr_SetString(imported_dbus_exception, msg);
-    }
+    PyObject *exception = get_dbus_exception();
+
+    if (exception != NULL)
+        PyErr_SetString(exception, msg);
     return NULL;
 }
 
 PyObject *
 DBusPyException_ConsumeError(DBusError *error)
 {
+    PyObject *exception = get_dbus_exception();
     PyObject *exc_value = NULL;
 
-    if (imported_dbus_exception == NULL && !import_exception()) {
+    if (exception == NULL) {
         goto finally;
     }
 
-    exc_value = PyObject_CallFunction(imported_dbus_exception,
+    exc_value = PyObject_CallFunction(exception,
                                       "s",
                                       error->message ? error->message
                                                      : "");
@@ -95,7 +116,7 @@ DBusPyException_ConsumeError(DBusError *error)
         }
     }
 
-    PyErr_SetObject(imported_dbus_exception, exc_value);
+    PyErr_SetObject(exception, exc_value);
 
 finally:
     Py_CLEAR(exc_value);

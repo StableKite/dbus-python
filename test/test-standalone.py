@@ -34,6 +34,7 @@ import logging
 import struct
 import sys
 import os
+import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -97,6 +98,21 @@ def uni(x):
         return struct.pack('>I', x).decode('utf_32_be')
 
 class TestConcurrentState(unittest.TestCase):
+    def test_concurrent_exception_creation(self):
+        ready = threading.Barrier(8)
+        with tempfile.TemporaryDirectory() as directory:
+            address = f'unix:path={directory}/absent'
+
+            def exercise(_):
+                ready.wait(timeout=10)
+                with self.assertRaises(dbus.DBusException) as raised:
+                    dbus.connection.Connection(address, mainloop=NULL_MAIN_LOOP)
+                self.assertEqual(raised.exception.get_dbus_name(),
+                                 'org.freedesktop.DBus.Error.FileNotFound')
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(exercise, range(8)))
+
     def test_register_paths_on_a_shared_connection(self):
         connection = dbus.SessionBus(private=True, mainloop=NULL_MAIN_LOOP)
         ready = threading.Barrier(8)
