@@ -46,23 +46,23 @@ dbus_py_variant_level_get(PyObject *obj)
     PyObject *vl_obj;
     PyObject *key = PyLong_FromVoidPtr(obj);
     long variant_level;
+    int status;
 
     if (!key) {
         return -1;
     }
 
-    vl_obj = PyDict_GetItem(_dbus_py_variant_levels, key);
+    status = PyDict_GetItemRef(_dbus_py_variant_levels, key, &vl_obj);
     Py_CLEAR(key);
 
-    if (!vl_obj) {
-        /* PyDict_GetItem() does not set an exception when the key is missing.
-         * In our case, it just means that there was no entry in the variant
-         * dictionary for this object.  Semantically, this is equivalent to a
-         * variant level of 0.
-         */
+    if (status < 0)
+        return -1;
+    if (status == 0) {
+        /* An absent entry is equivalent to a variant level of 0. */
         return 0;
     }
     variant_level = PyLong_AsLong(vl_obj);
+    Py_DECREF(vl_obj);
     if (variant_level == -1 && PyErr_Occurred()) {
         /* variant_level < 0 can never be inserted into the dictionary; see
          * dbus_py_variant_level_set() below.  The semantics of setting
@@ -113,6 +113,7 @@ PyObject *
 dbus_py_variant_level_getattro(PyObject *obj, PyObject *name)
 {
     PyObject *key, *value;
+    int status;
 
     if (PyUnicode_CompareWithASCIIString(name, "variant_level"))
         return PyObject_GenericGetAttr(obj, name);
@@ -123,12 +124,13 @@ dbus_py_variant_level_getattro(PyObject *obj, PyObject *name)
         return NULL;
     }
 
-    value = PyDict_GetItem(_dbus_py_variant_levels, key);
+    status = PyDict_GetItemRef(_dbus_py_variant_levels, key, &value);
     Py_CLEAR(key);
 
-    if (!value)
+    if (status < 0)
+        return NULL;
+    if (status == 0)
         return PyLong_FromLong(0);
-    Py_INCREF(value);
     return value;
 }
 

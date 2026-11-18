@@ -154,16 +154,25 @@ validate_object_path(PyObject *unused UNUSED, PyObject *args)
 
 /* The main loop if none is passed to the constructor */
 static PyObject *default_main_loop = NULL;
+#ifdef Py_GIL_DISABLED
+static PyMutex default_main_loop_mutex;
+#endif
 
 /* Return a new reference to the default main loop */
 PyObject *
 dbus_py_get_default_main_loop(void)
 {
-    if (!default_main_loop) {
-        Py_RETURN_NONE;
-    }
-    Py_INCREF(default_main_loop);
-    return default_main_loop;
+    PyObject *loop;
+
+#ifdef Py_GIL_DISABLED
+    PyMutex_Lock(&default_main_loop_mutex);
+#endif
+    loop = default_main_loop ? default_main_loop : Py_None;
+    Py_INCREF(loop);
+#ifdef Py_GIL_DISABLED
+    PyMutex_Unlock(&default_main_loop_mutex);
+#endif
+    return loop;
 }
 
 PyDoc_STRVAR(get_default_main_loop__doc__,
@@ -212,9 +221,15 @@ set_default_main_loop(PyObject *always_null UNUSED,
     if (!dbus_py_check_mainloop_sanity(new_loop)) {
         return NULL;
     }
-    old_loop = default_main_loop;
     Py_INCREF(new_loop);
+#ifdef Py_GIL_DISABLED
+    PyMutex_Lock(&default_main_loop_mutex);
+#endif
+    old_loop = default_main_loop;
     default_main_loop = new_loop;
+#ifdef Py_GIL_DISABLED
+    PyMutex_Unlock(&default_main_loop_mutex);
+#endif
     Py_CLEAR(old_loop);
     Py_RETURN_NONE;
 }

@@ -129,16 +129,13 @@ PyObject *
 DBusPyConnection_GetObjectPathHandlers(PyObject *self, PyObject *path)
 {
     PyObject *callbacks;
+    int status;
 
     TRACE(self);
-    callbacks = PyDict_GetItem(((Connection *)self)->object_paths, path);
-    if (!callbacks) {
-        if (PyErr_ExceptionMatches(PyExc_KeyError)) {
-            PyErr_Clear();
-            Py_RETURN_NONE;
-        }
-    }
-    Py_INCREF(callbacks);
+    status = PyDict_GetItemRef(((Connection *)self)->object_paths, path,
+                               &callbacks);
+    if (status == 0)
+        Py_RETURN_NONE;
     return callbacks;
 }
 

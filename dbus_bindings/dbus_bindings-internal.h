@@ -76,6 +76,17 @@ static inline int backport_PyWeakref_GetRef(PyObject *ref, PyObject **pobj)
     }
 }
 #define PyWeakref_GetRef(ref, pobj) backport_PyWeakref_GetRef(ref, pobj)
+
+static inline int backport_PyDict_GetItemRef(PyObject *dict, PyObject *key,
+                                            PyObject **result)
+{
+    PyObject *value = PyDict_GetItemWithError(dict, key);
+    Py_XINCREF(value);
+    *result = value;
+    return value ? 1 : PyErr_Occurred() ? -1 : 0;
+}
+#define PyDict_GetItemRef(dict, key, result) \
+    backport_PyDict_GetItemRef(dict, key, result)
 #endif
 
 #define DEFINE_CHECK(type) \

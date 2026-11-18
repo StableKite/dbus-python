@@ -526,19 +526,20 @@ static PyObject *
 Struct_tp_repr(PyObject *self)
 {
     PyObject *parent_repr = (PyTuple_Type.tp_repr)((PyObject *)self);
-    PyObject *sig;
+    PyObject *sig = NULL;
     PyObject *sig_repr = NULL;
     PyObject *key;
     long variant_level;
+    int status;
     PyObject *my_repr = NULL;
 
     if (!parent_repr) goto finally;
     key = PyLong_FromVoidPtr(self);
     if (!key) goto finally;
-    sig = PyDict_GetItem(struct_signatures, key);
+    status = PyDict_GetItemRef(struct_signatures, key, &sig);
     Py_CLEAR(key);
-    if (!sig) sig = Py_None;
-    sig_repr = PyObject_Repr(sig);
+    if (status < 0) goto finally;
+    sig_repr = PyObject_Repr(sig ? sig : Py_None);
     if (!sig_repr) goto finally;
 
     variant_level = dbus_py_variant_level_get(self);
@@ -561,6 +562,7 @@ Struct_tp_repr(PyObject *self)
     }
 
 finally:
+    Py_XDECREF(sig);
     Py_CLEAR(parent_repr);
     Py_CLEAR(sig_repr);
     return my_repr;
@@ -670,6 +672,7 @@ static PyObject *
 Struct_tp_getattro(PyObject *obj, PyObject *name)
 {
     PyObject *key, *value;
+    int status;
 
     if (PyUnicode_CompareWithASCIIString(name, "signature"))
         return dbus_py_variant_level_getattro(obj, name);
@@ -680,12 +683,13 @@ Struct_tp_getattro(PyObject *obj, PyObject *name)
         return NULL;
     }
 
-    value = PyDict_GetItem(struct_signatures, key);
+    status = PyDict_GetItemRef(struct_signatures, key, &value);
     Py_CLEAR(key);
 
-    if (!value)
-        value = Py_None;
-    Py_INCREF(value);
+    if (status < 0)
+        return NULL;
+    if (status == 0)
+        Py_RETURN_NONE;
     return value;
 }
 

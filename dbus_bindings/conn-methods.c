@@ -146,9 +146,7 @@ _filter_message(DBusConnection *conn, DBusMessage *message, void *user_data)
     Connection *conn_obj = NULL;
     PyObject *callable = NULL;
     PyObject *msg_obj;
-#ifndef DBUS_PYTHON_DISABLE_CHECKS
     Py_ssize_t i, size;
-#endif
 
     dbus_message_ref(message);
     msg_obj = DBusPyMessage_ConsumeDBusMessage(message);
@@ -176,9 +174,9 @@ _filter_message(DBusConnection *conn, DBusMessage *message, void *user_data)
      * filters list! (always put things in the list *before* giving
      * them to libdbus, etc.)
      */
-#ifdef DBUS_PYTHON_DISABLE_CHECKS
-    callable = (PyObject *)user_data;
-#else
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(conn_obj->filters);
+#endif
     size = PyList_GET_SIZE(conn_obj->filters);
     for (i = 0; i < size; i++) {
         callable = PyList_GET_ITEM(conn_obj->filters, i);
@@ -190,6 +188,9 @@ _filter_message(DBusConnection *conn, DBusMessage *message, void *user_data)
             callable = NULL;
         }
     }
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
 
     if (!callable) {
         DBG("... filter %p has vanished from ->filters, so not calling it",
@@ -197,8 +198,6 @@ _filter_message(DBusConnection *conn, DBusMessage *message, void *user_data)
         ret = DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
         goto out;
     }
-#endif
-
     ret = DBusPyConnection_HandleMessage(conn_obj, msg_obj, callable);
 out:
     Py_CLEAR(msg_obj);

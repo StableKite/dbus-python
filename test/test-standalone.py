@@ -34,11 +34,14 @@ import logging
 import struct
 import sys
 import os
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 import _dbus_bindings
 import dbus
 import dbus.lowlevel as lowlevel
+from dbus.mainloop import NULL_MAIN_LOOP
 import dbus.types as types
 import dbus_test_utils
 
@@ -92,6 +95,30 @@ def uni(x):
         return chr(x)
     else:
         return struct.pack('>I', x).decode('utf_32_be')
+
+class TestConcurrentState(unittest.TestCase):
+    def test_default_loop_and_struct_metadata(self):
+        original = dbus.get_default_main_loop()
+        start = threading.Barrier(8)
+
+        def exercise(worker):
+            start.wait(timeout=10)
+            for iteration in range(1000):
+                dbus.set_default_main_loop(NULL_MAIN_LOOP if worker % 2 else None)
+                self.assertIn(dbus.get_default_main_loop(), (NULL_MAIN_LOOP, None))
+                level = 1000 + worker + iteration
+                value = dbus.Struct((dbus.Int32(iteration),), signature='i',
+                                    variant_level=level)
+                self.assertEqual(value.signature, 'i')
+                self.assertEqual(value.variant_level, level)
+                self.assertIn(f'variant_level={level}', repr(value))
+
+        try:
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(exercise, range(8)))
+        finally:
+            dbus.set_default_main_loop(original)
+
 
 class TestTypes(unittest.TestCase):
 
