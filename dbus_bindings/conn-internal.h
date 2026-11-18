@@ -33,6 +33,9 @@
 typedef struct {
     PyObject_HEAD
     DBusConnection *conn;
+#ifdef Py_GIL_DISABLED
+    PyMutex object_paths_mutex;
+#endif
     /* A list of filter callbacks. */
     PyObject *filters;
     /* A dict mapping object paths to one of:
@@ -48,9 +51,6 @@ typedef struct {
 #endif
 
     dbus_bool_t has_mainloop;
-#ifdef Py_GIL_DISABLED
-    PyMutex object_paths_mutex;
-#endif
 } Connection;
 
 typedef struct {
