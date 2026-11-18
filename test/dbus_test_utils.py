@@ -51,3 +51,4 @@ def main():
                 'not ok 1 - %r (tap module not available)'
                 % program.result
             )
+            raise SystemExit(1)

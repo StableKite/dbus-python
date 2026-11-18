@@ -218,10 +218,13 @@ set_default_main_loop(PyObject *always_null UNUSED,
     if (!PyArg_ParseTuple(args, "O", &new_loop)) {
         return NULL;
     }
-    if (!dbus_py_check_mainloop_sanity(new_loop)) {
+    if (new_loop == Py_None) {
+        new_loop = NULL;
+    }
+    else if (!dbus_py_check_mainloop_sanity(new_loop)) {
         return NULL;
     }
-    Py_INCREF(new_loop);
+    Py_XINCREF(new_loop);
 #ifdef Py_GIL_DISABLED
     PyMutex_Lock(&default_main_loop_mutex);
 #endif
