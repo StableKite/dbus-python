@@ -706,6 +706,7 @@ Connection__register_object_path(Connection *self, PyObject *args,
 {
     dbus_bool_t ok;
     int fallback = 0;
+    int status;
     char *path_bytes;
     PyObject *callbacks, *path, *tuple, *on_message, *on_unregister = Py_None;
     static char *argnames[] = {"path", "on_message", "on_unregister",
@@ -758,22 +759,23 @@ Connection__register_object_path(Connection *self, PyObject *args,
         return NULL;
     }
 
-    /* Guard against registering a handler that already exists. */
-    callbacks = PyDict_GetItem(self->object_paths, path);
-    if (callbacks && callbacks != Py_None) {
-        PyErr_Format(PyExc_KeyError, "Can't register the object-path "
-                     "handler for '%s': there is already a handler",
-                     path_bytes);
-        Py_CLEAR(tuple);
-        Py_CLEAR(path);
-        return NULL;
-    }
-
-    /* Pre-allocate a slot in the dictionary, so we know we'll be able
-     * to replace it with the callbacks without OOM.
-     * This ensures we can keep libdbus' opinion of whether those
-     * paths are handled in sync with our own. */
-    if (PyDict_SetItem(self->object_paths, path, Py_None) < 0) {
+    /* Reserve the path before releasing Python to call libdbus. An existing
+     * None entry belongs to a registration or unregistration in progress. */
+#ifdef Py_GIL_DISABLED
+    PyMutex_Lock(&self->object_paths_mutex);
+#endif
+    status = PyDict_GetItemRef(self->object_paths, path, &callbacks);
+    if (status == 0)
+        status = PyDict_SetItem(self->object_paths, path, Py_None);
+#ifdef Py_GIL_DISABLED
+    PyMutex_Unlock(&self->object_paths_mutex);
+#endif
+    Py_XDECREF(callbacks);
+    if (status != 0) {
+        if (status > 0)
+            PyErr_Format(PyExc_KeyError, "Can't register the object-path "
+                         "handler for '%s': there is already a handler",
+                         path_bytes);
         Py_CLEAR(tuple);
         Py_CLEAR(path);
         return NULL;
@@ -836,6 +838,7 @@ Connection__unregister_object_path(Connection *self, PyObject *args,
                                    PyObject *kwargs)
 {
     dbus_bool_t ok;
+    int status;
     char *path_bytes;
     PyObject *path;
     PyObject *callbacks;
@@ -867,31 +870,26 @@ Connection__unregister_object_path(Connection *self, PyObject *args,
 
     path_bytes = PyBytes_AS_STRING(path);
 
-    /* Guard against unregistering a handler that doesn't, in fact, exist,
-    or whose unregistration is already in progress. */
-    callbacks = PyDict_GetItem(self->object_paths, path);
-    if (!callbacks || callbacks == Py_None) {
-        PyErr_Format(PyExc_KeyError, "Can't unregister the object-path "
-                     "handler for '%s': there is no such handler",
-                     path_bytes);
-        Py_CLEAR(path);
-        return NULL;
+    /* Atomically reserve an existing handler before calling libdbus.
+     * Its owned reference can restore the entry if unregistration fails. */
+#ifdef Py_GIL_DISABLED
+    PyMutex_Lock(&self->object_paths_mutex);
+#endif
+    status = PyDict_GetItemRef(self->object_paths, path, &callbacks);
+    if (status > 0) {
+        if (callbacks == Py_None)
+            status = 0;
+        else if (PyDict_SetItem(self->object_paths, path, Py_None) < 0)
+            status = -1;
     }
-
-    /* Hang on to a reference to the callbacks for the moment. */
-    Py_INCREF(callbacks);
-
-    /* Get rid of the object-path while we still have the GIL, to
-    guard against unregistering twice from different threads (which
-    causes undefined behaviour in libdbus).
-
-    Because deletion would make it possible for the re-insertion below
-    to fail, we instead set the handler to None as a placeholder.
-    */
-    if (PyDict_SetItem(self->object_paths, path, Py_None) < 0) {
-        /* If that failed, there's no need to be paranoid as below - the
-        callbacks are still set, so we failed, but at least everything
-        is in sync. */
+#ifdef Py_GIL_DISABLED
+    PyMutex_Unlock(&self->object_paths_mutex);
+#endif
+    if (status <= 0) {
+        if (status == 0)
+            PyErr_Format(PyExc_KeyError, "Can't unregister the object-path "
+                         "handler for '%s': there is no such handler",
+                         path_bytes);
         Py_CLEAR(callbacks);
         Py_CLEAR(path);
         return NULL;

@@ -97,6 +97,30 @@ def uni(x):
         return struct.pack('>I', x).decode('utf_32_be')
 
 class TestConcurrentState(unittest.TestCase):
+    def test_register_paths_on_a_shared_connection(self):
+        connection = dbus.SessionBus(private=True, mainloop=NULL_MAIN_LOOP)
+        ready = threading.Barrier(8)
+        checked = threading.Barrier(8)
+        base = '/org/freedesktop/DBus/Python/Tests/Concurrent'
+        children = {f'Worker{worker}' for worker in range(8)}
+
+        def exercise(worker):
+            path = f'{base}/Worker{worker}'
+            connection._register_object_path(path, lambda *_: NotImplemented)
+            try:
+                ready.wait(timeout=10)
+                self.assertEqual(set(connection.list_exported_child_objects(base)), children)
+                checked.wait(timeout=10)
+            finally:
+                connection._unregister_object_path(path)
+
+        try:
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(exercise, range(8)))
+            self.assertEqual(connection.list_exported_child_objects(base), [])
+        finally:
+            connection.close()
+
     def test_default_loop_and_struct_metadata(self):
         original = dbus.get_default_main_loop()
         start = threading.Barrier(8)

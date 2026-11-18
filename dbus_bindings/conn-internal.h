@@ -48,6 +48,9 @@ typedef struct {
 #endif
 
     dbus_bool_t has_mainloop;
+#ifdef Py_GIL_DISABLED
+    PyMutex object_paths_mutex;
+#endif
 } Connection;
 
 typedef struct {
