@@ -29,6 +29,8 @@
 
 from __future__ import generators
 
+from threading import Lock
+
 __all__ = ('Bus', 'SystemBus', 'SessionBus', 'StarterBus')
 __docformat__ = 'reStructuredText'
 
@@ -53,6 +55,7 @@ class Bus(BusConnection):
     """
 
     _shared_instances = {}
+    _shared_instances_lock = Lock()
 
     def __new__(cls, bus_type=BusConnection.TYPE_SESSION, private=False,
                 mainloop=None):
@@ -79,8 +82,11 @@ class Bus(BusConnection):
             converted from a wrapper around a Connection to a Connection
             subclass.
         """
-        if (not private and bus_type in cls._shared_instances):
-            return cls._shared_instances[bus_type]
+        if not private:
+            with cls._shared_instances_lock:
+                shared = cls._shared_instances.get(bus_type)
+            if shared is not None:
+                return shared
 
         # this is a bit odd, but we create instances of the subtypes
         # so we can return the shared instances if someone tries to
@@ -100,15 +106,23 @@ class Bus(BusConnection):
 
         bus._bus_type = bus_type
 
-        if not private:
-            cls._shared_instances[bus_type] = bus
+        if private:
+            return bus
 
-        return bus
+        # The native constructor can release the GIL and run main-loop setup.
+        # Publish only the first completed connection, and close any spare
+        # connection outside the registry lock.
+        with cls._shared_instances_lock:
+            shared = cls._shared_instances.setdefault(bus_type, bus)
+        if shared is not bus:
+            bus.close()
+        return shared
 
     def close(self):
         t = self._bus_type
-        if self.__class__._shared_instances.get(t) is self:
-            del self.__class__._shared_instances[t]
+        with self._shared_instances_lock:
+            if self._shared_instances.get(t) is self:
+                del self._shared_instances[t]
         super(Bus, self).close()
 
     def get_connection(self):

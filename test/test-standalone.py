@@ -38,6 +38,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 import _dbus_bindings
 import dbus
@@ -98,6 +99,36 @@ def uni(x):
         return struct.pack('>I', x).decode('utf_32_be')
 
 class TestConcurrentState(unittest.TestCase):
+    def test_shared_bus_is_published_once(self):
+        from dbus.bus import BusConnection
+
+        ready = threading.Barrier(8)
+        opened = []
+        opened_lock = threading.Lock()
+        new_connection = BusConnection.__new__
+
+        def connect(*args, **kwargs):
+            ready.wait(timeout=10)
+            bus = new_connection(*args, **kwargs)
+            with opened_lock:
+                opened.append(bus)
+            return bus
+
+        def get_shared_bus(_):
+            return dbus.SessionBus(mainloop=NULL_MAIN_LOOP)
+
+        try:
+            with patch.object(BusConnection, '__new__', staticmethod(connect)):
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    results = list(executor.map(get_shared_bus, range(8)))
+            shared = results[0]
+            self.assertTrue(all(bus is shared for bus in results))
+            self.assertEqual([bus for bus in opened if bus.get_is_connected()], [shared])
+        finally:
+            for bus in opened:
+                if bus.get_is_connected():
+                    bus.close()
+
     def test_concurrent_exception_creation(self):
         ready = threading.Barrier(8)
         with tempfile.TemporaryDirectory() as directory:
