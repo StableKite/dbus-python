@@ -168,6 +168,31 @@ class TestConcurrentState(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_pending_replies_on_a_shared_connection(self):
+        connection = dbus.SessionBus(private=True, mainloop=NULL_MAIN_LOOP)
+        ready = threading.Barrier(8)
+
+        def exercise(_):
+            ready.wait(timeout=10)
+            for _ in range(10):
+                replies = []
+                message = lowlevel.MethodCallMessage(
+                    'org.freedesktop.DBus', '/org/freedesktop/DBus',
+                    'org.freedesktop.DBus', 'ListNames')
+                pending = connection.send_message_with_reply(
+                    message, replies.append, 5, require_main_loop=False)
+                pending.block()
+                pending.block()
+                self.assertEqual(len(replies), 1)
+                self.assertIsInstance(replies[0], lowlevel.MethodReturnMessage)
+                self.assertIn('org.freedesktop.DBus', replies[0].get_args_list()[0])
+
+        try:
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(exercise, range(8)))
+        finally:
+            connection.close()
+
     def test_default_loop_and_struct_metadata(self):
         original = dbus.get_default_main_loop()
         start = threading.Barrier(8)

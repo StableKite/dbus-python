@@ -316,35 +316,38 @@ _signature_string_from_pyobject(PyObject *obj, long *variant_level_ptr)
         return ret;
     }
     else if (PyList_Check(obj)) {
-        PyObject *tmp;
-        PyObject *ret = PyUnicode_FromString(DBUS_TYPE_ARRAY_AS_STRING);
-        if (!ret) return NULL;
+        PyObject *first = NULL, *element, *ret;
         if (DBusPyArray_Check(obj) &&
             PyUnicode_Check(((DBusPyArray *)obj)->signature))
         {
-            PyObject *concat = PyUnicode_Concat(
-                ret, ((DBusPyArray *)obj)->signature);
-            Py_CLEAR(ret);
-            return concat;
+            return PyUnicode_FromFormat(DBUS_TYPE_ARRAY_AS_STRING "%U",
+                                        ((DBusPyArray *)obj)->signature);
         }
-        if (PyList_GET_SIZE(obj) == 0) {
+#ifdef Py_GIL_DISABLED
+        Py_BEGIN_CRITICAL_SECTION(obj);
+#endif
+        if (PyList_GET_SIZE(obj) > 0) {
+            first = PyList_GET_ITEM(obj, 0);
+            Py_INCREF(first);
+        }
+#ifdef Py_GIL_DISABLED
+        Py_END_CRITICAL_SECTION();
+#endif
+        if (first == NULL) {
             /* No items, so fail. Or should we guess "av"? */
             PyErr_SetString(PyExc_ValueError, "Unable to guess signature "
                             "from an empty list");
             return NULL;
         }
-        tmp = PyList_GetItem(obj, 0);
-        tmp = _signature_string_from_pyobject(tmp, NULL);
-        if (!tmp) return NULL;
-        {
-            PyObject *concat = PyUnicode_Concat(ret, tmp);
-            Py_CLEAR(ret);
-            Py_CLEAR(tmp);
-            return concat;
-        }
+        element = _signature_string_from_pyobject(first, NULL);
+        Py_DECREF(first);
+        if (!element) return NULL;
+        ret = PyUnicode_FromFormat(DBUS_TYPE_ARRAY_AS_STRING "%U", element);
+        Py_DECREF(element);
+        return ret;
     }
     else if (PyDict_Check(obj)) {
-        PyObject *key, *value, *keysig, *valuesig;
+        PyObject *key = NULL, *value = NULL, *keysig, *valuesig = NULL;
         Py_ssize_t pos = 0;
         PyObject *ret = NULL;
 
@@ -357,14 +360,27 @@ _signature_string_from_pyobject(PyObject *obj, long *variant_level_ptr)
                                          DBUS_DICT_ENTRY_END_CHAR_AS_STRING),
                                         ((DBusPyDict *)obj)->signature);
         }
-        if (!PyDict_Next(obj, &pos, &key, &value)) {
+#ifdef Py_GIL_DISABLED
+        Py_BEGIN_CRITICAL_SECTION(obj);
+#endif
+        if (PyDict_Next(obj, &pos, &key, &value)) {
+            Py_INCREF(key);
+            Py_INCREF(value);
+        }
+#ifdef Py_GIL_DISABLED
+        Py_END_CRITICAL_SECTION();
+#endif
+        if (key == NULL) {
             /* No items, so fail. Or should we guess "a{vv}"? */
             PyErr_SetString(PyExc_ValueError, "Unable to guess signature "
                              "from an empty dict");
             return NULL;
         }
         keysig = _signature_string_from_pyobject(key, NULL);
-        valuesig = _signature_string_from_pyobject(value, NULL);
+        if (keysig)
+            valuesig = _signature_string_from_pyobject(value, NULL);
+        Py_DECREF(key);
+        Py_DECREF(value);
         if (keysig && valuesig) {
             ret = PyUnicode_FromFormat((DBUS_TYPE_ARRAY_AS_STRING
                                         DBUS_DICT_ENTRY_BEGIN_CHAR_AS_STRING

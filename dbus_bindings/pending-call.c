@@ -79,25 +79,24 @@ _pending_call_notify_function(DBusPendingCall *pc,
                               PyObject *list)
 {
     PyGILState_STATE gil = PyGILState_Ensure();
-    /* BEGIN CRITICAL SECTION
-     * While holding the GIL, make sure the callback only gets called once
-     * by deleting it from the 1-item list that's held by libdbus.
-     */
-    PyObject *handler = PyList_GetItem(list, 0);
+    PyObject *handler = NULL;
     DBusMessage *msg;
 
-    if (!handler) {
-        PyErr_Print();
-        goto release;
+    /* Transfer the list's reference to the callback exactly once. SET_ITEM
+     * replaces the item without dropping the reference being transferred. */
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(list);
+#endif
+    if (PyList_GET_ITEM(list, 0) != Py_None) {
+        handler = PyList_GET_ITEM(list, 0);
+        Py_INCREF(Py_None);
+        PyList_SET_ITEM(list, 0, Py_None);
     }
-    if (handler == Py_None) {
-        /* We've already called (and thrown away) the callback */
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    if (handler == NULL)
         goto release;
-    }
-    Py_INCREF(handler);     /* previously borrowed from the list, now owned */
-    Py_INCREF(Py_None);     /* take a ref so SetItem can steal it */
-    PyList_SetItem(list, 0, Py_None);
-    /* END CRITICAL SECTION */
 
     msg = dbus_pending_call_steal_reply(pc);
 
