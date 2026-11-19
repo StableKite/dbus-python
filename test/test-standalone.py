@@ -32,7 +32,9 @@ from __future__ import unicode_literals
 
 import logging
 import struct
+import subprocess
 import sys
+import sysconfig
 import os
 import tempfile
 import threading
@@ -99,6 +101,62 @@ def uni(x):
         return struct.pack('>I', x).decode('utf_32_be')
 
 class TestConcurrentState(unittest.TestCase):
+    @unittest.skipUnless(sysconfig.get_config_var('Py_GIL_DISABLED'),
+                         'requires a free-threaded interpreter')
+    def test_core_import_preserves_free_threading(self):
+        environment = dict(os.environ)
+        environment.pop('PYTHON_GIL', None)
+        subprocess.run([sys.executable, '-c', '''
+import sys
+assert sys.flags.gil is None and not sys._is_gil_enabled()
+import _dbus_bindings
+import dbus
+assert not sys._is_gil_enabled()
+'''], env=environment, check=True)
+
+    def test_introspection_reply_can_complete_on_another_thread(self):
+        from dbus.proxies import ProxyObject
+
+        class Connection:
+            def activate_name_owner(self, name):
+                return name
+
+            def call_async(self, bus_name, path, interface, method, signature,
+                           args, reply, error, **kwargs):
+                self.reply = reply
+                return self
+
+            def block(self):
+                worker = threading.Thread(target=self.reply, args=('<node/>',),
+                                          daemon=True)
+                worker.start()
+                worker.join(timeout=10)
+                if worker.is_alive():
+                    raise AssertionError('Introspection blocked its reply handler')
+
+        connection = Connection()
+        proxy = ProxyObject(connection, ':1.2', '/test')
+        received = []
+        proxy._introspect_add_to_queue(received.append, ('ready',), {})
+        proxy._introspect_block()
+        self.assertEqual(received, ['ready'])
+        self.assertIsNone(proxy._pending_introspect)
+
+    def test_immediate_introspection_reply_does_not_retain_completed_call(self):
+        from dbus.proxies import ProxyObject
+
+        class Connection:
+            def activate_name_owner(self, name):
+                return name
+
+            def call_async(self, bus_name, path, interface, method, signature,
+                           args, reply, error, **kwargs):
+                reply('<node/>')
+                return object()
+
+        proxy = ProxyObject(Connection(), ':1.2', '/test')
+        self.assertIsNone(proxy._pending_introspect)
+
     def test_filter_registration_on_a_shared_connection(self):
         connection = dbus.SessionBus(private=True, mainloop=NULL_MAIN_LOOP)
         barrier = threading.Barrier(8)

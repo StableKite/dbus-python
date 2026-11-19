@@ -256,8 +256,6 @@ class ProxyObject(object):
         #dictionary mapping method names to their input signatures
         self._introspect_method_map = {}
 
-        # must be a recursive lock because block() is called while locked,
-        # and calls the callback which re-takes the lock
         self._introspect_lock = RLock()
 
         if not introspect or self.__dbus_object_path__ == LOCAL_PATH:
@@ -265,7 +263,10 @@ class ProxyObject(object):
         else:
             self._introspect_state = self.INTROSPECT_STATE_INTROSPECT_IN_PROGRESS
 
-            self._pending_introspect = self._Introspect()
+            pending = self._Introspect()
+            with self._introspect_lock:
+                if self._introspect_state == self.INTROSPECT_STATE_INTROSPECT_IN_PROGRESS:
+                    self._pending_introspect = pending
 
     bus_name = property(lambda self: self._named_service, None, None,
             """The bus name to which this proxy is bound. (Read-only,
@@ -394,28 +395,27 @@ class ProxyObject(object):
                                     self._introspect_error_handler,
                                     require_main_loop=False, **kwargs)
 
-    def _introspect_execute_queue(self):
-        # FIXME: potential to flood the bus
-        # We should make sure mainloops all have idle handlers
-        # and do one message per idle
-        for (proxy_method, args, keywords) in self._pending_introspect_queue:
-            proxy_method(*args, **keywords)
-        self._pending_introspect_queue = []
+    def _introspect_complete(self, state, methods=None):
+        with self._introspect_lock:
+            if self._introspect_state != self.INTROSPECT_STATE_INTROSPECT_IN_PROGRESS:
+                return
+            if methods is not None:
+                self._introspect_method_map = methods
+            self._introspect_state = state
+            self._pending_introspect = None
+            queue, self._pending_introspect_queue = self._pending_introspect_queue, []
+
+        # Calls may run user callbacks and re-enter the proxy on another thread.
+        for proxy_method, args, kwargs in queue:
+            proxy_method(*args, **kwargs)
 
     def _introspect_reply_handler(self, data):
-        self._introspect_lock.acquire()
         try:
-            try:
-                self._introspect_method_map = process_introspection_data(data)
-            except IntrospectionParserException as e:
-                self._introspect_error_handler(e)
-                return
-
-            self._introspect_state = self.INTROSPECT_STATE_INTROSPECT_DONE
-            self._pending_introspect = None
-            self._introspect_execute_queue()
-        finally:
-            self._introspect_lock.release()
+            methods = process_introspection_data(data)
+        except IntrospectionParserException as error:
+            self._introspect_error_handler(error)
+            return
+        self._introspect_complete(self.INTROSPECT_STATE_INTROSPECT_DONE, methods)
 
     def _introspect_error_handler(self, error):
         logging.basicConfig()
@@ -423,36 +423,22 @@ class ProxyObject(object):
                       self._named_service, self.__dbus_object_path__,
                       error.__class__.__module__, error.__class__.__name__,
                       error)
-        self._introspect_lock.acquire()
-        try:
-            _logger.debug('Executing introspect queue due to error')
-            self._introspect_state = self.INTROSPECT_STATE_DONT_INTROSPECT
-            self._pending_introspect = None
-            self._introspect_execute_queue()
-        finally:
-            self._introspect_lock.release()
+        _logger.debug('Executing introspect queue due to error')
+        self._introspect_complete(self.INTROSPECT_STATE_DONT_INTROSPECT)
 
     def _introspect_block(self):
-        self._introspect_lock.acquire()
-        try:
-            if self._pending_introspect is not None:
-                self._pending_introspect.block()
-            # else someone still has a _DeferredMethod from before we
-            # finished introspection: no need to do anything special any more
-        finally:
-            self._introspect_lock.release()
+        with self._introspect_lock:
+            pending = self._pending_introspect
+        if pending is not None:
+            pending.block()
 
     def _introspect_add_to_queue(self, callback, args, kwargs):
-        self._introspect_lock.acquire()
-        try:
+        with self._introspect_lock:
             if self._introspect_state == self.INTROSPECT_STATE_INTROSPECT_IN_PROGRESS:
                 self._pending_introspect_queue.append((callback, args, kwargs))
-            else:
-                # someone still has a _DeferredMethod from before we
-                # finished introspection
-                callback(*args, **kwargs)
-        finally:
-            self._introspect_lock.release()
+                return
+        # Someone still holds a _DeferredMethod from before introspection finished.
+        callback(*args, **kwargs)
 
     def __getattr__(self, member):
         if member.startswith('__') and member.endswith('__'):

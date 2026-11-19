@@ -297,6 +297,10 @@ PyInit__dbus_bindings(void)
 
     this_module = PyModule_Create(&moduledef);
     if (!this_module) goto init_error;
+#ifdef Py_GIL_DISABLED
+    if (PyUnstable_Module_SetGIL(this_module, Py_MOD_GIL_NOT_USED) < 0)
+        goto init_error;
+#endif
 
     if (!dbus_py_insert_abstract_types(this_module)) goto init_error;
     if (!dbus_py_insert_signature(this_module)) goto init_error;
