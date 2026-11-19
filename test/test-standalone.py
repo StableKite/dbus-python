@@ -215,6 +215,27 @@ class TestConcurrentState(unittest.TestCase):
         finally:
             dbus.set_default_main_loop(original)
 
+    def test_container_signature_can_be_read_during_reinitialization(self):
+        array = dbus.Array([1], signature='i')
+        mapping = dbus.Dictionary({'name': 1}, signature='si')
+        ready = threading.Barrier(4)
+
+        def exercise(worker):
+            ready.wait(timeout=10)
+            if worker == 0:
+                for signature in ('i', 'u') * 100:
+                    array.__init__([1], signature=signature)
+                    mapping.__init__({'name': 1}, signature='s' + signature)
+            else:
+                for _ in range(200):
+                    self.assertIn(array.signature, ('i', 'u'))
+                    self.assertIn(mapping.signature, ('si', 'su'))
+                    self.assertIn(lowlevel.Message.guess_signature(array), ('ai', 'au'))
+                    self.assertIn(lowlevel.Message.guess_signature(mapping), ('a{si}', 'a{su}'))
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(exercise, range(4)))
+
 
 class TestTypes(unittest.TestCase):
 

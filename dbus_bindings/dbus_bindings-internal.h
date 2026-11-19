@@ -156,6 +156,8 @@ extern PyTypeObject DBusPyObjectPath_Type, DBusPySignature_Type;
 DEFINE_CHECK(DBusPyObjectPath)
 DEFINE_CHECK(DBusPySignature)
 extern PyTypeObject DBusPyArray_Type, DBusPyDict_Type, DBusPyStruct_Type;
+PyObject *DBusPyArray_GetSignature(PyObject *array, void *closure);
+PyObject *DBusPyDict_GetSignature(PyObject *dict, void *closure);
 DEFINE_CHECK(DBusPyArray)
 DEFINE_CHECK(DBusPyDict)
 DEFINE_CHECK(DBusPyStruct)

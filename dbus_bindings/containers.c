@@ -55,10 +55,53 @@ PyDoc_STRVAR(Array_tp_doc,
 "D-Bus, the item signature will be guessed from the first element.\n"
 );
 
-static struct PyMemberDef Array_tp_members[] = {
-    {"signature", T_OBJECT, offsetof(DBusPyArray, signature), READONLY,
+static PyObject *
+get_container_signature(PyObject *container, PyObject *const *slot)
+{
+    PyObject *signature;
+    (void)container;
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(container);
+#endif
+    signature = Py_NewRef(*slot);
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    return signature;
+}
+
+static void
+replace_container_signature(PyObject *container, PyObject **slot,
+                            PyObject *signature)
+{
+    PyObject *previous;
+    (void)container;
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(container);
+#endif
+    previous = *slot;
+    *slot = signature;
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    Py_DECREF(previous);
+}
+
+PyObject *
+DBusPyArray_GetSignature(PyObject *array, void *closure)
+{
+    (void)closure;
+    return get_container_signature(array, &((DBusPyArray *)array)->signature);
+}
+
+static PyGetSetDef Array_tp_getset[] = {
+    {"signature", DBusPyArray_GetSignature, NULL,
      "The D-Bus signature of each element of this Array (a Signature "
      "instance)"},
+    {NULL},
+};
+
+static struct PyMemberDef Array_tp_members[] = {
     {"variant_level", T_LONG, offsetof(DBusPyArray, variant_level),
      READONLY,
     "Indicates how many nested Variant containers this object\n"
@@ -80,10 +123,12 @@ static PyObject *
 Array_tp_repr(DBusPyArray *self)
 {
     PyObject *parent_repr = (PyList_Type.tp_repr)((PyObject *)self);
-    PyObject *sig_repr = PyObject_Repr(self->signature);
+    PyObject *signature = DBusPyArray_GetSignature((PyObject *)self, NULL);
+    PyObject *sig_repr = PyObject_Repr(signature);
     PyObject *my_repr = NULL;
     long variant_level = self->variant_level;
 
+    Py_DECREF(signature);
     if (!parent_repr) goto finally;
     if (!sig_repr) goto finally;
     if (variant_level > 0) {
@@ -201,8 +246,7 @@ Array_tp_init (DBusPyArray *self, PyObject *args, PyObject *kwargs)
     }
     Py_CLEAR(tuple);
 
-    Py_CLEAR(self->signature);
-    self->signature = signature;
+    replace_container_signature((PyObject *)self, &self->signature, signature);
     return 0;
 }
 
@@ -236,7 +280,7 @@ PyTypeObject DBusPyArray_Type = {
     0,                                      /* tp_iternext */
     0,                                      /* tp_methods */
     Array_tp_members,                       /* tp_members */
-    0,                                      /* tp_getset */
+    Array_tp_getset,                        /* tp_getset */
     0,                                      /* tp_base */
     0,                                      /* tp_dict */
     0,                                      /* tp_descr_get */
@@ -273,10 +317,21 @@ PyDoc_STRVAR(Dict_tp_doc,
 "element of the Dictionary.\n"
 );
 
-static struct PyMemberDef Dict_tp_members[] = {
-    {"signature", T_OBJECT, offsetof(DBusPyDict, signature), READONLY,
+PyObject *
+DBusPyDict_GetSignature(PyObject *dict, void *closure)
+{
+    (void)closure;
+    return get_container_signature(dict, &((DBusPyDict *)dict)->signature);
+}
+
+static PyGetSetDef Dict_tp_getset[] = {
+    {"signature", DBusPyDict_GetSignature, NULL,
      "The D-Bus signature of each key in this Dictionary, followed by "
      "that of each value in this Dictionary, as a Signature instance."},
+    {NULL},
+};
+
+static struct PyMemberDef Dict_tp_members[] = {
     {"variant_level", T_LONG, offsetof(DBusPyDict, variant_level),
      READONLY,
     "Indicates how many nested Variant containers this object\n"
@@ -298,10 +353,12 @@ static PyObject *
 Dict_tp_repr(DBusPyDict *self)
 {
     PyObject *parent_repr = (PyDict_Type.tp_repr)((PyObject *)self);
-    PyObject *sig_repr = PyObject_Repr(self->signature);
+    PyObject *signature = DBusPyDict_GetSignature((PyObject *)self, NULL);
+    PyObject *sig_repr = PyObject_Repr(signature);
     PyObject *my_repr = NULL;
     long variant_level = self->variant_level;
 
+    Py_DECREF(signature);
     if (!parent_repr) goto finally;
     if (!sig_repr) goto finally;
     if (variant_level > 0) {
@@ -447,8 +504,7 @@ Dict_tp_init(DBusPyDict *self, PyObject *args, PyObject *kwargs)
     }
     Py_CLEAR(tuple);
 
-    Py_CLEAR(self->signature);
-    self->signature = signature;
+    replace_container_signature((PyObject *)self, &self->signature, signature);
     return 0;
 }
 
@@ -482,7 +538,7 @@ PyTypeObject DBusPyDict_Type = {
     0,                                      /* tp_iternext */
     0,                                      /* tp_methods */
     Dict_tp_members,                        /* tp_members */
-    0,                                      /* tp_getset */
+    Dict_tp_getset,                         /* tp_getset */
     0,                                      /* tp_base */
     0,                                      /* tp_dict */
     0,                                      /* tp_descr_get */

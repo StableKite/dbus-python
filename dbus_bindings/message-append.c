@@ -317,11 +317,15 @@ _signature_string_from_pyobject(PyObject *obj, long *variant_level_ptr)
     }
     else if (PyList_Check(obj)) {
         PyObject *first = NULL, *element, *ret;
-        if (DBusPyArray_Check(obj) &&
-            PyUnicode_Check(((DBusPyArray *)obj)->signature))
-        {
-            return PyUnicode_FromFormat(DBUS_TYPE_ARRAY_AS_STRING "%U",
-                                        ((DBusPyArray *)obj)->signature);
+        if (DBusPyArray_Check(obj)) {
+            PyObject *signature = DBusPyArray_GetSignature(obj, NULL);
+
+            if (PyUnicode_Check(signature)) {
+                ret = PyUnicode_FromFormat(DBUS_TYPE_ARRAY_AS_STRING "%U", signature);
+                Py_DECREF(signature);
+                return ret;
+            }
+            Py_DECREF(signature);
         }
 #ifdef Py_GIL_DISABLED
         Py_BEGIN_CRITICAL_SECTION(obj);
@@ -351,14 +355,19 @@ _signature_string_from_pyobject(PyObject *obj, long *variant_level_ptr)
         Py_ssize_t pos = 0;
         PyObject *ret = NULL;
 
-        if (DBusPyDict_Check(obj) &&
-            PyUnicode_Check(((DBusPyDict *)obj)->signature))
-        {
-            return PyUnicode_FromFormat((DBUS_TYPE_ARRAY_AS_STRING
-                                         DBUS_DICT_ENTRY_BEGIN_CHAR_AS_STRING
-                                         "%U"
-                                         DBUS_DICT_ENTRY_END_CHAR_AS_STRING),
-                                        ((DBusPyDict *)obj)->signature);
+        if (DBusPyDict_Check(obj)) {
+            PyObject *signature = DBusPyDict_GetSignature(obj, NULL);
+
+            if (PyUnicode_Check(signature)) {
+                ret = PyUnicode_FromFormat((DBUS_TYPE_ARRAY_AS_STRING
+                                            DBUS_DICT_ENTRY_BEGIN_CHAR_AS_STRING
+                                            "%U"
+                                            DBUS_DICT_ENTRY_END_CHAR_AS_STRING),
+                                           signature);
+                Py_DECREF(signature);
+                return ret;
+            }
+            Py_DECREF(signature);
         }
 #ifdef Py_GIL_DISABLED
         Py_BEGIN_CRITICAL_SECTION(obj);
