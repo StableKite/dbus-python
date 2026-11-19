@@ -32,6 +32,7 @@
 #define PY_SIZE_T_CLEAN 1
 
 #include <Python.h>
+#include <pythread.h>
 
 #define INSIDE_DBUS_PYTHON_BINDINGS
 #include "dbus/dbus-python.h"
@@ -196,7 +197,7 @@ extern dbus_bool_t dbus_py_insert_float_types(PyObject *this_module);
 extern dbus_bool_t dbus_py_insert_container_types(PyObject *this_module);
 extern dbus_bool_t dbus_py_insert_byte_types(PyObject *this_module);
 
-int dbus_py_unix_fd_get_fd(PyObject *self);
+int dbus_py_unix_fd_dup(PyObject *self);
 
 /* generic */
 extern void dbus_py_take_gil_and_xdecref(PyObject *);
@@ -205,7 +206,14 @@ extern PyObject *dbus_py_empty_tuple;
 extern dbus_bool_t dbus_py_init_generic(void);
 
 /* message.c */
-extern DBusMessage *DBusPyMessage_BorrowDBusMessage(PyObject *msg);
+typedef struct {
+    PyObject *owner;
+    DBusMessage *msg;
+    PyThread_type_lock native_lock;
+} DBusPyMessageAccess;
+
+extern dbus_bool_t DBusPyMessage_Lock(PyObject *, DBusPyMessageAccess *);
+extern void DBusPyMessage_Unlock(DBusPyMessageAccess *);
 extern PyObject *DBusPyMessage_ConsumeDBusMessage(DBusMessage *);
 extern dbus_bool_t dbus_py_init_message_types(void);
 extern dbus_bool_t dbus_py_insert_message_types(PyObject *this_module);

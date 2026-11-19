@@ -99,6 +99,83 @@ def uni(x):
         return struct.pack('>I', x).decode('utf_32_be')
 
 class TestConcurrentState(unittest.TestCase):
+    def test_filter_registration_on_a_shared_connection(self):
+        connection = dbus.SessionBus(private=True, mainloop=NULL_MAIN_LOOP)
+        barrier = threading.Barrier(8)
+
+        class Receiver:
+            def filter(self, _connection, _message):
+                return None
+
+        def register_and_remove(_worker):
+            receiver = Receiver()
+            barrier.wait(timeout=10)
+            connection.add_message_filter(receiver.filter)
+            barrier.wait(timeout=10)
+            connection.remove_message_filter(receiver.filter)
+            with self.assertRaises(ValueError):
+                connection.remove_message_filter(receiver.filter)
+
+        try:
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(register_and_remove, range(8)))
+        finally:
+            connection.close()
+
+    @unittest.skipIf(sys.platform.startswith("win"), "requires Unix")
+    def test_take_fd_from_shared_object(self):
+        with open('/dev/null', 'rb') as original:
+            descriptor = types.UnixFd(original)
+        ready = threading.Barrier(8)
+
+        def take(_worker):
+            ready.wait(timeout=10)
+            try:
+                fd = descriptor.take()
+            except ValueError:
+                return False
+            with os.fdopen(fd, 'rb') as file:
+                self.assertEqual(file.read(), b'')
+            return True
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            self.assertEqual(sum(executor.map(take, range(8))), 1)
+
+    def test_message_rejects_overlapping_operations(self):
+        entered = threading.Event()
+        finish = threading.Event()
+        test = self
+
+        class DeferredPath:
+            @property
+            def __dbus_object_path__(self):
+                entered.set()
+                test.assertTrue(finish.wait(timeout=10))
+                return '/test/argument'
+
+        message = lowlevel.SignalMessage('/test', 'org.example.Test', 'Changed')
+        connection = dbus.SessionBus(private=True, mainloop=NULL_MAIN_LOOP)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                append = executor.submit(message.append, DeferredPath(),
+                                         signature='o')
+                try:
+                    self.assertTrue(entered.wait(timeout=10))
+                    with self.assertRaisesRegex(RuntimeError, 'Concurrent access'):
+                        message.get_args_list()
+                    with self.assertRaisesRegex(RuntimeError, 'Concurrent access'):
+                        connection.send_message(message)
+                    self.assertEqual(
+                        lowlevel.SignalMessage('/other', 'org.example.Test',
+                                               'Changed').get_path(), '/other')
+                finally:
+                    finish.set()
+                append.result(timeout=10)
+            self.assertEqual(message.get_args_list(), ['/test/argument'])
+            self.assertGreater(connection.send_message(message), 0)
+        finally:
+            connection.close()
+
     def test_shared_bus_is_published_once(self):
         from dbus.bus import BusConnection
 
@@ -694,6 +771,14 @@ class TestMessageMarshalling(unittest.TestCase):
 
                 fd = types.UnixFd(file_like_object, variant_level=42)
                 self.assertEqual(fd.variant_level, 42)
+
+                msg = lowlevel.SignalMessage('/test', 'org.example.Test', 'Changed')
+                msg.append(fd, signature='h')
+                with os.fdopen(fd.take(), 'rb') as transferred:
+                    self.assertEqual(transferred.read(), b'')
+                received, = msg.get_args_list()
+                with os.fdopen(received.take(), 'rb') as duplicated:
+                    self.assertEqual(duplicated.read(), b'')
 
                 with self.assertRaises(TypeError):
                     int(fd)

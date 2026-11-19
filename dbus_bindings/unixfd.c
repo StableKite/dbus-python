@@ -28,6 +28,7 @@
 
 #include "dbus_bindings-internal.h"
 
+#include <errno.h>
 #include <Python.h>
 #include <structmember.h>
 
@@ -63,6 +64,7 @@ typedef struct {
     PyObject_HEAD
     int fd;
     long variant_level;
+    PyThread_type_lock lock;
 } UnixFdObject;
 
 /* Return values:
@@ -161,6 +163,11 @@ UnixFd_tp_new(PyTypeObject *cls, PyObject *args, PyObject *kwargs)
 
     self->fd = fd;
     self->variant_level = variant_level;
+    self->lock = PyThread_allocate_lock();
+    if (!self->lock) {
+        Py_DECREF(self);
+        return PyErr_NoMemory();
+    }
 
     return (PyObject *)self;
 }
@@ -170,8 +177,9 @@ UnixFd_dealloc(UnixFdObject *self)
 {
     if (self->fd >= 0) {
         close(self->fd);
-        self->fd = -1;
     }
+    if (self->lock) PyThread_free_lock(self->lock);
+    Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
 PyDoc_STRVAR(UnixFd_take__doc__,
@@ -189,23 +197,44 @@ PyDoc_STRVAR(UnixFd_take__doc__,
 static PyObject *
 UnixFd_take(UnixFdObject *self)
 {
-    PyObject *fdnumber;
+    int fd;
+    PyObject *result;
 
-    if (self->fd < 0) {
+    PyThread_acquire_lock(self->lock, WAIT_LOCK);
+    fd = self->fd;
+    self->fd = -1;
+    PyThread_release_lock(self->lock);
+    if (fd < 0) {
         PyErr_SetString(PyExc_ValueError, "File descriptor already taken");
         return NULL;
     }
 
-    fdnumber = Py_BuildValue("i", self->fd);
-    self->fd = -1;
-
-    return fdnumber;
+    result = PyLong_FromLong(fd);
+    if (!result) close(fd);
+    return result;
 }
 
 int
-dbus_py_unix_fd_get_fd(PyObject *self)
+dbus_py_unix_fd_dup(PyObject *obj)
 {
-    return ((UnixFdObject *) self)->fd;
+    UnixFdObject *self = (UnixFdObject *)obj;
+    int original_fd, fd = -1;
+    int saved_errno = 0;
+
+    PyThread_acquire_lock(self->lock, WAIT_LOCK);
+    original_fd = self->fd;
+    if (original_fd >= 0) {
+        fd = dup(original_fd);
+        if (fd < 0) saved_errno = errno;
+    }
+    PyThread_release_lock(self->lock);
+    if (original_fd < 0) {
+        PyErr_SetString(PyExc_ValueError, "File descriptor already taken");
+    } else if (fd < 0) {
+        errno = saved_errno;
+        PyErr_SetFromErrno(PyExc_OSError);
+    }
+    return fd;
 }
 
 static PyMethodDef UnixFd_methods[] = {

@@ -35,6 +35,7 @@
 typedef struct {
     PyObject_HEAD
     DBusMessage *msg;
+    PyThread_type_lock lock;
 } Message;
 
 extern char dbus_py_Message_append__doc__[];

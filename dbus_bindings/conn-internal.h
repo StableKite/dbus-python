@@ -38,6 +38,7 @@ typedef struct {
 #endif
     /* A list of filter callbacks. */
     PyObject *filters;
+    PyThread_type_lock filters_lock;
     /* A dict mapping object paths to one of:
      * - tuples (unregister_callback or None, message_callback)
      * - None (meaning unregistration from libdbus is in progress and nobody

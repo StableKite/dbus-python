@@ -242,6 +242,12 @@ DBusPyConnection_NewConsumingDBusConnection(PyTypeObject *cls,
     self->object_paths = PyDict_New();
     if (!self->object_paths) goto err;
 
+    self->filters_lock = PyThread_allocate_lock();
+    if (!self->filters_lock) {
+        PyErr_NoMemory();
+        goto err;
+    }
+
     ref = PyWeakref_NewRef((PyObject *)self, NULL);
     if (!ref) goto err;
     DBG("Created weak ref %p to (Connection *)%p for (DBusConnection *)%p",
@@ -428,6 +434,7 @@ static void Connection_tp_dealloc(Connection *self)
         DBG("Connection at %p: unreffing conn", self);
         dbus_connection_unref(conn);
     }
+    if (self->filters_lock) PyThread_free_lock(self->filters_lock);
 
     DBG("Connection at %p: freeing self", self);
     PyErr_Restore(et, ev, etb);

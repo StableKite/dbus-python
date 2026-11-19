@@ -318,19 +318,19 @@ Connection_send_message(Connection *self, PyObject *args)
 {
     dbus_bool_t ok;
     PyObject *obj;
-    DBusMessage *msg;
+    DBusPyMessageAccess access;
     dbus_uint32_t serial;
 
     TRACE(self);
     DBUS_PY_RAISE_VIA_NULL_IF_FAIL(self->conn);
     if (!PyArg_ParseTuple(args, "O", &obj)) return NULL;
 
-    msg = DBusPyMessage_BorrowDBusMessage(obj);
-    if (!msg) return NULL;
+    if (!DBusPyMessage_Lock(obj, &access)) return NULL;
 
     Py_BEGIN_ALLOW_THREADS
-    ok = dbus_connection_send(self->conn, msg, &serial);
+    ok = dbus_connection_send(self->conn, access.msg, &serial);
     Py_END_ALLOW_THREADS
+    DBusPyMessage_Unlock(&access);
 
     if (!ok) {
         return PyErr_NoMemory();
@@ -390,7 +390,7 @@ Connection_send_message_with_reply(Connection *self, PyObject *args, PyObject *k
     double timeout_s = -1.0;
     int timeout_ms;
     PyObject *obj, *callable;
-    DBusMessage *msg;
+    DBusPyMessageAccess access;
     DBusPendingCall *pending;
     int require_main_loop = 0;
     static char *argnames[] = {"msg", "reply_handler", "timeout_s",
@@ -409,9 +409,6 @@ Connection_send_message_with_reply(Connection *self, PyObject *args, PyObject *k
         return NULL;
     }
 
-    msg = DBusPyMessage_BorrowDBusMessage(obj);
-    if (!msg) return NULL;
-
     if (timeout_s < 0) {
         timeout_ms = -1;
     }
@@ -423,10 +420,12 @@ Connection_send_message_with_reply(Connection *self, PyObject *args, PyObject *k
         timeout_ms = (int)(timeout_s * 1000.0);
     }
 
+    if (!DBusPyMessage_Lock(obj, &access)) return NULL;
     Py_BEGIN_ALLOW_THREADS
-    ok = dbus_connection_send_with_reply(self->conn, msg, &pending,
+    ok = dbus_connection_send_with_reply(self->conn, access.msg, &pending,
                                          timeout_ms);
     Py_END_ALLOW_THREADS
+    DBusPyMessage_Unlock(&access);
 
     if (!ok) {
         return PyErr_NoMemory();
@@ -471,7 +470,8 @@ Connection_send_message_with_reply_and_block(Connection *self, PyObject *args)
     double timeout_s = -1.0;
     int timeout_ms;
     PyObject *obj;
-    DBusMessage *msg, *reply;
+    DBusPyMessageAccess access;
+    DBusMessage *reply;
     DBusError error;
 
     TRACE(self);
@@ -480,9 +480,6 @@ Connection_send_message_with_reply_and_block(Connection *self, PyObject *args)
                           &timeout_s)) {
         return NULL;
     }
-
-    msg = DBusPyMessage_BorrowDBusMessage(obj);
-    if (!msg) return NULL;
 
     if (timeout_s < 0) {
         timeout_ms = -1;
@@ -495,11 +492,13 @@ Connection_send_message_with_reply_and_block(Connection *self, PyObject *args)
         timeout_ms = (int)(timeout_s * 1000.0);
     }
 
+    if (!DBusPyMessage_Lock(obj, &access)) return NULL;
     dbus_error_init(&error);
     Py_BEGIN_ALLOW_THREADS
-    reply = dbus_connection_send_with_reply_and_block(self->conn, msg,
+    reply = dbus_connection_send_with_reply_and_block(self->conn, access.msg,
                                                       timeout_ms, &error);
     Py_END_ALLOW_THREADS
+    DBusPyMessage_Unlock(&access);
 
     /* FIXME: if we instead used send_with_reply and blocked on the resulting
      * PendingCall, then we could get all args from the error, not just
@@ -622,6 +621,16 @@ PyDoc_STRVAR(Connection_add_message_filter__doc__,
 "than once. Filters added during a filter callback won't be run on the\n"
 "message being processed.\n"
 );
+/* A list update and its libdbus registration are one operation. Waiting here
+ * must release the thread state: the holder calls libdbus with it released. */
+static void
+lock_filter_registrations(Connection *self)
+{
+    Py_BEGIN_ALLOW_THREADS
+    PyThread_acquire_lock(self->filters_lock, WAIT_LOCK);
+    Py_END_ALLOW_THREADS
+}
+
 static PyObject *
 Connection_add_message_filter(Connection *self, PyObject *callable)
 {
@@ -632,7 +641,9 @@ Connection_add_message_filter(Connection *self, PyObject *callable)
     /* The callable must be referenced by ->filters *before* it is
      * given to libdbus, which does not own a reference to it.
      */
+    lock_filter_registrations(self);
     if (PyList_Append(self->filters, callable) < 0) {
+        PyThread_release_lock(self->filters_lock);
         return NULL;
     }
 
@@ -642,11 +653,13 @@ Connection_add_message_filter(Connection *self, PyObject *callable)
     Py_END_ALLOW_THREADS
 
     if (!ok) {
-        Py_XDECREF(PyObject_CallMethod(self->filters, "remove", "(O)",
-                                       callable));
+        Py_ssize_t last = PyList_GET_SIZE(self->filters) - 1;
+        PyList_SetSlice(self->filters, last, last + 1, NULL);
+        PyThread_release_lock(self->filters_lock);
         PyErr_NoMemory();
         return NULL;
     }
+    PyThread_release_lock(self->filters_lock);
     Py_RETURN_NONE;
 }
 
@@ -659,20 +672,44 @@ PyDoc_STRVAR(Connection_remove_message_filter__doc__,
 static PyObject *
 Connection_remove_message_filter(Connection *self, PyObject *callable)
 {
-    PyObject *obj;
+    PyObject *snapshot, *registered;
+    Py_ssize_t index, count;
 
     TRACE(self);
     DBUS_PY_RAISE_VIA_NULL_IF_FAIL(self->conn);
-    /* It's safe to do this before removing it from libdbus, because
-     * the presence of callable in our arguments means we have a ref
-     * to it. */
-    obj = PyObject_CallMethod(self->filters, "remove", "(O)", callable);
-    if (!obj) return NULL;
-    Py_CLEAR(obj);
+    /* Equality may execute Python (for example for bound method objects).
+     * Compare outside the native registration lock, then remove by identity. */
+    snapshot = PyList_AsTuple(self->filters);
+    if (!snapshot) return NULL;
+    index = PySequence_Index(snapshot, callable);
+    if (index < 0) {
+        Py_DECREF(snapshot);
+        return NULL;
+    }
+    registered = PyTuple_GET_ITEM(snapshot, index);
+
+    lock_filter_registrations(self);
+    count = PyList_GET_SIZE(self->filters);
+    for (index = 0; index < count; index++) {
+        if (PyList_GET_ITEM(self->filters, index) == registered) break;
+    }
+    if (index == count) {
+        PyThread_release_lock(self->filters_lock);
+        Py_DECREF(snapshot);
+        PyErr_SetString(PyExc_ValueError, "Message filter is not registered");
+        return NULL;
+    }
+    if (PyList_SetSlice(self->filters, index, index + 1, NULL) < 0) {
+        PyThread_release_lock(self->filters_lock);
+        Py_DECREF(snapshot);
+        return NULL;
+    }
 
     Py_BEGIN_ALLOW_THREADS
-    dbus_connection_remove_filter(self->conn, _filter_message, callable);
+    dbus_connection_remove_filter(self->conn, _filter_message, registered);
     Py_END_ALLOW_THREADS
+    PyThread_release_lock(self->filters_lock);
+    Py_DECREF(snapshot);
 
     Py_RETURN_NONE;
 }

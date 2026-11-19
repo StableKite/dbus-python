@@ -32,10 +32,42 @@
 static PyTypeObject MessageType, SignalMessageType, ErrorMessageType;
 static PyTypeObject MethodReturnMessageType, MethodCallMessageType;
 
-static inline int Message_Check(PyObject *o)
+static dbus_int32_t message_lock_slot = -1;
+static PyThread_type_lock message_slot_lock;
+
+static void
+free_message_lock(void *data)
 {
-    return (Py_TYPE(o) == &MessageType)
-            || PyObject_IsInstance(o, (PyObject *)&MessageType);
+    PyThread_free_lock(data);
+}
+
+static PyThread_type_lock
+lock_native_message(DBusMessage *message)
+{
+    PyThread_type_lock lock;
+
+    /* A native message can be passed to more than one Python handler. */
+    PyThread_acquire_lock(message_slot_lock, WAIT_LOCK);
+    lock = dbus_message_get_data(message, message_lock_slot);
+    if (!lock) {
+        lock = PyThread_allocate_lock();
+        if (lock && !dbus_message_set_data(message, message_lock_slot,
+                                            lock, free_message_lock)) {
+            PyThread_free_lock(lock);
+            lock = NULL;
+        }
+    }
+    PyThread_release_lock(message_slot_lock);
+
+    if (!lock) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    if (!PyThread_acquire_lock(lock, NOWAIT_LOCK)) {
+        PyErr_SetString(PyExc_RuntimeError, "Concurrent access to a D-Bus message");
+        return NULL;
+    }
+    return lock;
 }
 
 PyObject *
@@ -47,13 +79,68 @@ DBusPy_RaiseUnusableMessage(void)
     return NULL;
 }
 
+static dbus_bool_t
+lock_message(Message *self, DBusPyMessageAccess *access)
+{
+    /* Argument conversion can call Python code that re-enters this message.
+     * Reject overlapping access instead of blocking inside such a callback. */
+    if (!PyThread_acquire_lock(self->lock, NOWAIT_LOCK)) {
+        PyErr_SetString(PyExc_RuntimeError, "Concurrent access to a D-Bus message");
+        return FALSE;
+    }
+    access->owner = (PyObject *)self;
+    access->msg = self->msg;
+    access->native_lock = NULL;
+    if (access->msg) {
+        access->native_lock = lock_native_message(access->msg);
+        if (!access->native_lock) {
+            PyThread_release_lock(self->lock);
+            return FALSE;
+        }
+        /* Keep the native lock alive if initialization or append replaces msg. */
+        dbus_message_ref(access->msg);
+    }
+    return TRUE;
+}
+
+void
+DBusPyMessage_Unlock(DBusPyMessageAccess *access)
+{
+    if (access->msg) {
+        PyThread_release_lock(access->native_lock);
+        dbus_message_unref(access->msg);
+    }
+    PyThread_release_lock(((Message *)access->owner)->lock);
+}
+
+dbus_bool_t
+DBusPyMessage_Lock(PyObject *message, DBusPyMessageAccess *access)
+{
+    if (!PyObject_TypeCheck(message, &MessageType)) {
+        PyErr_SetString(PyExc_TypeError,
+                       "A dbus.lowlevel.Message instance is required");
+        return FALSE;
+    }
+    if (!lock_message((Message *)message, access)) return FALSE;
+    if (!access->msg) {
+        DBusPyMessage_Unlock(access);
+        DBusPy_RaiseUnusableMessage();
+        return FALSE;
+    }
+    return TRUE;
+}
+
 PyDoc_STRVAR(Message_tp_doc,
-"A message to be sent or received over a D-Bus Connection.\n");
+"A message to be sent or received over a D-Bus Connection.\n"
+"Overlapping access to the same message raises RuntimeError.\n");
 
 static void Message_tp_dealloc(Message *self)
 {
     if (self->msg) {
         dbus_message_unref(self->msg);
+    }
+    if (self->lock) {
+        PyThread_free_lock(self->lock);
     }
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
@@ -68,17 +155,26 @@ Message_tp_new(PyTypeObject *type,
     self = (Message *)type->tp_alloc(type, 0);
     if (!self) return NULL;
     self->msg = NULL;
+    self->lock = PyThread_allocate_lock();
+    if (!self->lock) {
+        Py_DECREF(self);
+        return PyErr_NoMemory();
+    }
     return (PyObject *)self;
 }
 
 static PyObject *
 MethodCallMessage_tp_repr(PyObject *self)
 {
-    DBusMessage *msg = ((Message *)self)->msg;
-    const char *destination = dbus_message_get_destination(msg);
-    const char *path = dbus_message_get_path(msg);
-    const char *interface = dbus_message_get_interface(msg);
-    const char *member = dbus_message_get_member(msg);
+    DBusPyMessageAccess access;
+    PyObject *result;
+    const char *destination, *path, *interface, *member;
+
+    if (!DBusPyMessage_Lock(self, &access)) return NULL;
+    destination = dbus_message_get_destination(access.msg);
+    path = dbus_message_get_path(access.msg);
+    interface = dbus_message_get_interface(access.msg);
+    member = dbus_message_get_member(access.msg);
 
     if (!path)
         path = "n/a";
@@ -89,10 +185,12 @@ MethodCallMessage_tp_repr(PyObject *self)
     if (!destination)
         destination = "n/a";
 
-    return PyUnicode_FromFormat(
+    result = PyUnicode_FromFormat(
         "<%s path: %s, iface: %s, member: %s dest: %s>",
         Py_TYPE(self)->tp_name,
         path, interface, member, destination);
+    DBusPyMessage_Unlock(&access);
+    return result;
 }
 
 PyDoc_STRVAR(MethodCallMessage_tp_doc,
@@ -149,21 +247,23 @@ static int
 MethodReturnMessage_tp_init(Message *self, PyObject *args, PyObject *kwargs)
 {
     Message *other;
+    DBusPyMessageAccess other_access;
+    DBusMessage *reply;
     static char *kwlist[] = {"method_call", NULL};
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!:__init__", kwlist,
                                      &MessageType, &other)) {
         return -1;
     }
-    if (self->msg) {
-        dbus_message_unref(self->msg);
-        self->msg = NULL;
-    }
-    self->msg = dbus_message_new_method_return(other->msg);
-    if (!self->msg) {
+    if (!DBusPyMessage_Lock((PyObject *)other, &other_access)) return -1;
+    reply = dbus_message_new_method_return(other_access.msg);
+    DBusPyMessage_Unlock(&other_access);
+    if (!reply) {
         PyErr_NoMemory();
         return -1;
     }
+    if (self->msg) dbus_message_unref(self->msg);
+    self->msg = reply;
     return 0;
 }
 
@@ -199,11 +299,15 @@ SignalMessage_tp_init(Message *self, PyObject *args, PyObject *kwargs)
 static PyObject *
 SignalMessage_tp_repr(PyObject *self)
 {
-    DBusMessage *msg = ((Message *)self)->msg;
-    const char *path = dbus_message_get_path(msg);
-    const char *interface = dbus_message_get_interface(msg);
-    const char *member = dbus_message_get_member(msg);
-    const char *destination = dbus_message_get_destination(msg);
+    DBusPyMessageAccess access;
+    PyObject *result;
+    const char *destination, *path, *interface, *member;
+
+    if (!DBusPyMessage_Lock(self, &access)) return NULL;
+    path = dbus_message_get_path(access.msg);
+    interface = dbus_message_get_interface(access.msg);
+    member = dbus_message_get_member(access.msg);
+    destination = dbus_message_get_destination(access.msg);
 
     if (!path)
         path = "n/a";
@@ -214,9 +318,11 @@ SignalMessage_tp_repr(PyObject *self)
     if (!destination)
         destination = "(broadcast)";
 
-    return PyUnicode_FromFormat("<%s path: %s, iface: %s, member: %s, dest: %s>",
+    result = PyUnicode_FromFormat("<%s path: %s, iface: %s, member: %s, dest: %s>",
                                 Py_TYPE(self)->tp_name,
                                 path, interface, member, destination);
+    DBusPyMessage_Unlock(&access);
+    return result;
 }
 
 PyDoc_STRVAR(ErrorMessage_tp_doc,
@@ -228,6 +334,8 @@ static int
 ErrorMessage_tp_init(Message *self, PyObject *args, PyObject *kwargs)
 {
     Message *reply_to;
+    DBusPyMessageAccess other_access;
+    DBusMessage *reply;
     const char *error_name, *error_message;
     static char *kwlist[] = {"reply_to", "error_name", "error_message", NULL};
 
@@ -237,31 +345,16 @@ ErrorMessage_tp_init(Message *self, PyObject *args, PyObject *kwargs)
         return -1;
     }
     if (!dbus_py_validate_error_name(error_name)) return -1;
-    if (self->msg) {
-        dbus_message_unref(self->msg);
-        self->msg = NULL;
-    }
-    self->msg = dbus_message_new_error(reply_to->msg, error_name, error_message);
-    if (!self->msg) {
+    if (!DBusPyMessage_Lock((PyObject *)reply_to, &other_access)) return -1;
+    reply = dbus_message_new_error(other_access.msg, error_name, error_message);
+    DBusPyMessage_Unlock(&other_access);
+    if (!reply) {
         PyErr_NoMemory();
         return -1;
     }
+    if (self->msg) dbus_message_unref(self->msg);
+    self->msg = reply;
     return 0;
-}
-
-DBusMessage *
-DBusPyMessage_BorrowDBusMessage(PyObject *msg)
-{
-    if (!Message_Check(msg)) {
-        PyErr_SetString(PyExc_TypeError,
-                       "A dbus.lowlevel.Message instance is required");
-        return NULL;
-    }
-    if (!((Message *)msg)->msg) {
-        DBusPy_RaiseUnusableMessage();
-        return NULL;
-    }
-    return ((Message *)msg)->msg;
 }
 
 PyObject *
@@ -269,8 +362,17 @@ DBusPyMessage_ConsumeDBusMessage(DBusMessage *msg)
 {
     PyTypeObject *type;
     Message *self;
+    PyThread_type_lock lock;
+    int message_type;
 
-    switch (dbus_message_get_type(msg)) {
+    lock = lock_native_message(msg);
+    if (!lock) {
+        dbus_message_unref(msg);
+        return NULL;
+    }
+    message_type = dbus_message_get_type(msg);
+    PyThread_release_lock(lock);
+    switch (message_type) {
     case DBUS_MESSAGE_TYPE_METHOD_CALL:
         type = &MethodCallMessageType;
         break;
@@ -806,82 +908,163 @@ Message_set_error_name(Message *self, PyObject *args)
     Py_RETURN_NONE;
 }
 
+#define LOCK_MESSAGE_METHOD(method)                                        \
+    static PyObject *method##_locked(Message *self, PyObject *args)         \
+    {                                                                      \
+        DBusPyMessageAccess access;                                        \
+        PyObject *result;                                                  \
+        if (!lock_message(self, &access)) return NULL;                     \
+        result = method(self, args);                                       \
+        DBusPyMessage_Unlock(&access);                                     \
+        return result;                                                     \
+    }
+
+#define LOCK_MESSAGE_KEYWORD_METHOD(method)                                \
+    static PyObject *method##_locked(Message *self, PyObject *args,         \
+                                     PyObject *kwargs)                     \
+    {                                                                      \
+        DBusPyMessageAccess access;                                        \
+        PyObject *result;                                                  \
+        if (!lock_message(self, &access)) return NULL;                     \
+        result = method(self, args, kwargs);                               \
+        DBusPyMessage_Unlock(&access);                                     \
+        return result;                                                     \
+    }
+
+#define LOCK_MESSAGE_INIT(method)                                          \
+    static int method##_locked(Message *self, PyObject *args,              \
+                               PyObject *kwargs)                           \
+    {                                                                      \
+        DBusPyMessageAccess access;                                        \
+        int result;                                                        \
+        if (!lock_message(self, &access)) return -1;                       \
+        result = method(self, args, kwargs);                               \
+        DBusPyMessage_Unlock(&access);                                     \
+        return result;                                                     \
+    }
+
+LOCK_MESSAGE_METHOD(Message_copy)
+LOCK_MESSAGE_METHOD(Message_is_method_call)
+LOCK_MESSAGE_METHOD(Message_is_signal)
+LOCK_MESSAGE_METHOD(Message_is_error)
+LOCK_MESSAGE_KEYWORD_METHOD(dbus_py_Message_get_args_list)
+LOCK_MESSAGE_KEYWORD_METHOD(dbus_py_Message_append)
+LOCK_MESSAGE_METHOD(Message_get_auto_start)
+LOCK_MESSAGE_METHOD(Message_set_auto_start)
+LOCK_MESSAGE_METHOD(Message_get_destination)
+LOCK_MESSAGE_METHOD(Message_set_destination)
+LOCK_MESSAGE_METHOD(Message_has_destination)
+LOCK_MESSAGE_METHOD(Message_get_error_name)
+LOCK_MESSAGE_METHOD(Message_set_error_name)
+LOCK_MESSAGE_METHOD(Message_get_interface)
+LOCK_MESSAGE_METHOD(Message_set_interface)
+LOCK_MESSAGE_METHOD(Message_has_interface)
+LOCK_MESSAGE_METHOD(Message_get_member)
+LOCK_MESSAGE_METHOD(Message_set_member)
+LOCK_MESSAGE_METHOD(Message_has_member)
+LOCK_MESSAGE_METHOD(Message_get_path)
+LOCK_MESSAGE_METHOD(Message_get_path_decomposed)
+LOCK_MESSAGE_METHOD(Message_set_path)
+LOCK_MESSAGE_METHOD(Message_has_path)
+LOCK_MESSAGE_METHOD(Message_get_no_reply)
+LOCK_MESSAGE_METHOD(Message_set_no_reply)
+LOCK_MESSAGE_METHOD(Message_get_allow_interactive_authorization)
+LOCK_MESSAGE_METHOD(Message_set_allow_interactive_authorization)
+LOCK_MESSAGE_METHOD(Message_get_reply_serial)
+LOCK_MESSAGE_METHOD(Message_set_reply_serial)
+LOCK_MESSAGE_METHOD(Message_get_sender)
+LOCK_MESSAGE_METHOD(Message_set_sender)
+LOCK_MESSAGE_METHOD(Message_has_sender)
+LOCK_MESSAGE_METHOD(Message_get_serial)
+LOCK_MESSAGE_METHOD(Message_get_signature)
+LOCK_MESSAGE_METHOD(Message_has_signature)
+LOCK_MESSAGE_METHOD(Message_get_type)
+
+LOCK_MESSAGE_INIT(MethodCallMessage_tp_init)
+LOCK_MESSAGE_INIT(MethodReturnMessage_tp_init)
+LOCK_MESSAGE_INIT(SignalMessage_tp_init)
+LOCK_MESSAGE_INIT(ErrorMessage_tp_init)
+
+#undef LOCK_MESSAGE_METHOD
+#undef LOCK_MESSAGE_KEYWORD_METHOD
+#undef LOCK_MESSAGE_INIT
+
 static PyMethodDef Message_tp_methods[] = {
-    {"copy", (PyCFunction) (void (*)(void)) Message_copy,
+    {"copy", (PyCFunction) (void (*)(void)) Message_copy_locked,
       METH_NOARGS, Message_copy__doc__},
-    {"is_method_call", (PyCFunction) (void (*)(void)) Message_is_method_call,
+    {"is_method_call", (PyCFunction) (void (*)(void)) Message_is_method_call_locked,
       METH_VARARGS, Message_is_method_call__doc__},
-    {"is_signal", (PyCFunction) (void (*)(void)) Message_is_signal,
+    {"is_signal", (PyCFunction) (void (*)(void)) Message_is_signal_locked,
       METH_VARARGS, Message_is_signal__doc__},
-    {"is_error", (PyCFunction) (void (*)(void)) Message_is_error,
+    {"is_error", (PyCFunction) (void (*)(void)) Message_is_error_locked,
       METH_VARARGS, Message_is_error__doc__},
 
-    {"get_args_list", (PyCFunction) (void (*)(void)) dbus_py_Message_get_args_list,
+    {"get_args_list", (PyCFunction) (void (*)(void)) dbus_py_Message_get_args_list_locked,
       METH_VARARGS|METH_KEYWORDS, dbus_py_Message_get_args_list__doc__},
     {"guess_signature", (PyCFunction) (void (*)(void)) dbus_py_Message_guess_signature,
       METH_VARARGS|METH_STATIC, dbus_py_Message_guess_signature__doc__},
-    {"append", (PyCFunction) (void (*)(void)) dbus_py_Message_append,
+    {"append", (PyCFunction) (void (*)(void)) dbus_py_Message_append_locked,
       METH_VARARGS|METH_KEYWORDS, dbus_py_Message_append__doc__},
 
-    {"get_auto_start", (PyCFunction) (void (*)(void)) Message_get_auto_start,
+    {"get_auto_start", (PyCFunction) (void (*)(void)) Message_get_auto_start_locked,
       METH_NOARGS, Message_get_auto_start__doc__},
-    {"set_auto_start", (PyCFunction) (void (*)(void)) Message_set_auto_start,
+    {"set_auto_start", (PyCFunction) (void (*)(void)) Message_set_auto_start_locked,
       METH_VARARGS, Message_set_auto_start__doc__},
-    {"get_destination", (PyCFunction) (void (*)(void)) Message_get_destination,
+    {"get_destination", (PyCFunction) (void (*)(void)) Message_get_destination_locked,
       METH_NOARGS, Message_get_destination__doc__},
-    {"set_destination", (PyCFunction) (void (*)(void)) Message_set_destination,
+    {"set_destination", (PyCFunction) (void (*)(void)) Message_set_destination_locked,
       METH_VARARGS, Message_set_destination__doc__},
-    {"has_destination", (PyCFunction) (void (*)(void)) Message_has_destination,
+    {"has_destination", (PyCFunction) (void (*)(void)) Message_has_destination_locked,
       METH_VARARGS, Message_has_destination__doc__},
-    {"get_error_name", (PyCFunction) (void (*)(void)) Message_get_error_name,
+    {"get_error_name", (PyCFunction) (void (*)(void)) Message_get_error_name_locked,
       METH_NOARGS, Message_get_error_name__doc__},
-    {"set_error_name", (PyCFunction) (void (*)(void)) Message_set_error_name,
+    {"set_error_name", (PyCFunction) (void (*)(void)) Message_set_error_name_locked,
       METH_VARARGS, Message_set_error_name__doc__},
-    {"get_interface", (PyCFunction) (void (*)(void)) Message_get_interface,
+    {"get_interface", (PyCFunction) (void (*)(void)) Message_get_interface_locked,
       METH_NOARGS, Message_get_interface__doc__},
-    {"set_interface", (PyCFunction) (void (*)(void))Message_set_interface,
+    {"set_interface", (PyCFunction) (void (*)(void))Message_set_interface_locked,
       METH_VARARGS, Message_set_interface__doc__},
-    {"has_interface", (PyCFunction) (void (*)(void))Message_has_interface,
+    {"has_interface", (PyCFunction) (void (*)(void))Message_has_interface_locked,
       METH_VARARGS, Message_has_interface__doc__},
-    {"get_member", (PyCFunction) (void (*)(void))Message_get_member,
+    {"get_member", (PyCFunction) (void (*)(void))Message_get_member_locked,
       METH_NOARGS, Message_get_member__doc__},
-    {"set_member", (PyCFunction) (void (*)(void))Message_set_member,
+    {"set_member", (PyCFunction) (void (*)(void))Message_set_member_locked,
       METH_VARARGS, Message_set_member__doc__},
-    {"has_member", (PyCFunction) (void (*)(void))Message_has_member,
+    {"has_member", (PyCFunction) (void (*)(void))Message_has_member_locked,
       METH_VARARGS, Message_has_member__doc__},
-    {"get_path", (PyCFunction) (void (*)(void))Message_get_path,
+    {"get_path", (PyCFunction) (void (*)(void))Message_get_path_locked,
       METH_NOARGS, Message_get_path__doc__},
-    {"get_path_decomposed", (PyCFunction) (void (*)(void))Message_get_path_decomposed,
+    {"get_path_decomposed", (PyCFunction) (void (*)(void))Message_get_path_decomposed_locked,
       METH_NOARGS, Message_get_path_decomposed__doc__},
-    {"set_path", (PyCFunction) (void (*)(void))Message_set_path,
+    {"set_path", (PyCFunction) (void (*)(void))Message_set_path_locked,
       METH_VARARGS, Message_set_path__doc__},
-    {"has_path", (PyCFunction) (void (*)(void))Message_has_path,
+    {"has_path", (PyCFunction) (void (*)(void))Message_has_path_locked,
       METH_VARARGS, Message_has_path__doc__},
-    {"get_no_reply", (PyCFunction) (void (*)(void))Message_get_no_reply,
+    {"get_no_reply", (PyCFunction) (void (*)(void))Message_get_no_reply_locked,
       METH_NOARGS, Message_get_no_reply__doc__},
-    {"set_no_reply", (PyCFunction) (void (*)(void))Message_set_no_reply,
+    {"set_no_reply", (PyCFunction) (void (*)(void))Message_set_no_reply_locked,
       METH_VARARGS, Message_set_no_reply__doc__},
-    {"get_allow_interactive_authorization", (PyCFunction) (void (*)(void))Message_get_allow_interactive_authorization,
+    {"get_allow_interactive_authorization", (PyCFunction) (void (*)(void))Message_get_allow_interactive_authorization_locked,
     METH_NOARGS, Message_get_allow_interactive_authorization__doc__},
-    {"set_allow_interactive_authorization", (PyCFunction) (void (*)(void))Message_set_allow_interactive_authorization,
+    {"set_allow_interactive_authorization", (PyCFunction) (void (*)(void))Message_set_allow_interactive_authorization_locked,
     METH_VARARGS, Message_set_allow_interactive_authorization__doc__},
-    {"get_reply_serial", (PyCFunction) (void (*)(void))Message_get_reply_serial,
+    {"get_reply_serial", (PyCFunction) (void (*)(void))Message_get_reply_serial_locked,
       METH_NOARGS, Message_get_reply_serial__doc__},
-    {"set_reply_serial", (PyCFunction) (void (*)(void))Message_set_reply_serial,
+    {"set_reply_serial", (PyCFunction) (void (*)(void))Message_set_reply_serial_locked,
       METH_VARARGS, Message_set_reply_serial__doc__},
-    {"get_sender", (PyCFunction) (void (*)(void))Message_get_sender,
+    {"get_sender", (PyCFunction) (void (*)(void))Message_get_sender_locked,
       METH_NOARGS, Message_get_sender__doc__},
-    {"set_sender", (PyCFunction) (void (*)(void))Message_set_sender,
+    {"set_sender", (PyCFunction) (void (*)(void))Message_set_sender_locked,
       METH_VARARGS, Message_set_sender__doc__},
-    {"has_sender", (PyCFunction) (void (*)(void))Message_has_sender,
+    {"has_sender", (PyCFunction) (void (*)(void))Message_has_sender_locked,
       METH_VARARGS, Message_has_sender__doc__},
-    {"get_serial", (PyCFunction) (void (*)(void))Message_get_serial,
+    {"get_serial", (PyCFunction) (void (*)(void))Message_get_serial_locked,
       METH_NOARGS, Message_get_serial__doc__},
-    {"get_signature", (PyCFunction) (void (*)(void))Message_get_signature,
+    {"get_signature", (PyCFunction) (void (*)(void))Message_get_signature_locked,
       METH_NOARGS, Message_get_signature__doc__},
-    {"has_signature", (PyCFunction) (void (*)(void))Message_has_signature,
+    {"has_signature", (PyCFunction) (void (*)(void))Message_has_signature_locked,
       METH_VARARGS, Message_has_signature__doc__},
-    {"get_type", (PyCFunction) (void (*)(void))Message_get_type,
+    {"get_type", (PyCFunction) (void (*)(void))Message_get_type_locked,
       METH_NOARGS, Message_get_type__doc__},
     {NULL, NULL, 0, NULL}
 };
@@ -963,7 +1146,7 @@ static PyTypeObject MethodCallMessageType = {
     0,                         /* tp_descr_get */
     0,                         /* tp_descr_set */
     0,                         /* tp_dictoffset */
-    (initproc)MethodCallMessage_tp_init,    /* tp_init */
+    (initproc)MethodCallMessage_tp_init_locked,    /* tp_init */
     0,                         /* tp_alloc */
     0,                         /* tp_new */
 };
@@ -1004,7 +1187,7 @@ static PyTypeObject MethodReturnMessageType = {
     0,                         /* tp_descr_get */
     0,                         /* tp_descr_set */
     0,                         /* tp_dictoffset */
-    (initproc)MethodReturnMessage_tp_init,    /* tp_init */
+    (initproc)MethodReturnMessage_tp_init_locked,    /* tp_init */
     0,                         /* tp_alloc */
     0,                         /* tp_new */
 };
@@ -1045,7 +1228,7 @@ static PyTypeObject SignalMessageType = {
     0,                         /* tp_descr_get */
     0,                         /* tp_descr_set */
     0,                         /* tp_dictoffset */
-    (initproc)SignalMessage_tp_init,    /* tp_init */
+    (initproc)SignalMessage_tp_init_locked,    /* tp_init */
     0,                         /* tp_alloc */
     0,                         /* tp_new */
 };
@@ -1086,7 +1269,7 @@ static PyTypeObject ErrorMessageType = {
     0,                         /* tp_descr_get */
     0,                         /* tp_descr_set */
     0,                         /* tp_dictoffset */
-    (initproc)ErrorMessage_tp_init,    /* tp_init */
+    (initproc)ErrorMessage_tp_init_locked,    /* tp_init */
     0,                         /* tp_alloc */
     0,                         /* tp_new */
 };
@@ -1094,6 +1277,19 @@ static PyTypeObject ErrorMessageType = {
 dbus_bool_t
 dbus_py_init_message_types(void)
 {
+    if (!message_slot_lock) {
+        message_slot_lock = PyThread_allocate_lock();
+        if (!message_slot_lock) {
+            PyErr_NoMemory();
+            return 0;
+        }
+        if (!dbus_message_allocate_data_slot(&message_lock_slot)) {
+            PyThread_free_lock(message_slot_lock);
+            message_slot_lock = NULL;
+            PyErr_NoMemory();
+            return 0;
+        }
+    }
     if (PyType_Ready(&MessageType) < 0) return 0;
 
     MethodCallMessageType.tp_base = &MessageType;

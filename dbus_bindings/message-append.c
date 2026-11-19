@@ -29,6 +29,9 @@
 #include "dbus_bindings-internal.h"
 
 #include <assert.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #define DBG_IS_TOO_VERBOSE
 #include "compat-internal.h"
@@ -597,6 +600,8 @@ _message_iter_append_unixfd(DBusMessageIter *appender, PyObject *obj)
 {
     int fd;
     long original_fd;
+    dbus_bool_t temporary_fd = FALSE;
+    dbus_bool_t appended;
 
     if (PyLong_Check(obj))
     {
@@ -611,15 +616,19 @@ _message_iter_append_unixfd(DBusMessageIter *appender, PyObject *obj)
         }
         fd = (int)original_fd;
     }
-    else if (PyObject_IsInstance(obj, (PyObject*) &DBusPyUnixFd_Type)) {
-        fd = dbus_py_unix_fd_get_fd(obj);
+    else if (PyObject_TypeCheck(obj, &DBusPyUnixFd_Type)) {
+        fd = dbus_py_unix_fd_dup(obj);
+        if (fd < 0) return -1;
+        temporary_fd = TRUE;
     }
     else {
         return -1;
     }
 
     DBG("Performing actual append: fd %d", fd);
-    if (!dbus_message_iter_append_basic(appender, DBUS_TYPE_UNIX_FD, &fd)) {
+    appended = dbus_message_iter_append_basic(appender, DBUS_TYPE_UNIX_FD, &fd);
+    if (temporary_fd) close(fd);
+    if (!appended) {
         PyErr_NoMemory();
         return -1;
     }

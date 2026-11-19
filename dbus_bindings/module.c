@@ -271,6 +271,8 @@ PyInit__dbus_bindings(void)
         NULL                    /* m_free */
     };
 
+    if (!dbus_threads_init_default()) return PyErr_NoMemory();
+
     dbus_bindings_API[0] = (_dbus_py_func_ptr)&API_count;
     dbus_bindings_API[1] = (_dbus_py_func_ptr)DBusPyConnection_BorrowDBusConnection;
     dbus_bindings_API[2] = (_dbus_py_func_ptr)DBusPyNativeMainLoop_New4;
