@@ -121,6 +121,7 @@ typedef struct
 
 dbus_int32_t _dbus_gmain_connection_slot = -1;
 static dbus_int32_t server_slot = -1;
+G_LOCK_DEFINE_STATIC (setup);
 
 static ConnectionSetup*
 connection_setup_new (GMainContext   *context,
@@ -142,7 +143,6 @@ connection_setup_new (GMainContext   *context,
       cs->message_queue_source = g_source_new ((GSourceFuncs *) &message_queue_funcs,
                                                sizeof (DBusGMessageQueue));
       ((DBusGMessageQueue*)cs->message_queue_source)->connection = connection;
-      g_source_attach (cs->message_queue_source, cs->context);
     }
 
   return cs;
@@ -261,11 +261,11 @@ connection_setup_add_watch (ConnectionSetup *cs,
   g_source_set_callback (handler->source,
                          (GSourceFunc) (void (*) (void)) io_handler_dispatch,
                          handler, io_handler_source_finalized);
-  g_source_attach (handler->source, cs->context);
 
   cs->ios = g_slist_prepend (cs->ios, handler);
 
   dbus_watch_set_data (watch, handler, io_handler_watch_freed);
+  g_source_attach (handler->source, cs->context);
   g_io_channel_unref (channel);
 }
 
@@ -353,11 +353,11 @@ connection_setup_add_timeout (ConnectionSetup *cs,
   handler->source = g_timeout_source_new (dbus_timeout_get_interval (timeout));
   g_source_set_callback (handler->source, timeout_handler_dispatch, handler,
                          timeout_handler_source_finalized);
-  g_source_attach (handler->source, handler->cs->context);
 
   cs->timeouts = g_slist_prepend (cs->timeouts, handler);
 
   dbus_timeout_set_data (timeout, handler, timeout_handler_timeout_freed);
+  g_source_attach (handler->source, cs->context);
 }
 
 static void
@@ -535,11 +535,10 @@ set_up_connection, DBusConnection *connection,
   ConnectionSetup *old_setup;
   ConnectionSetup *cs;
 
-  /* FIXME we never free the slot, so its refcount just keeps growing,
-   * which is kind of broken.
-   */
-  dbus_connection_allocate_data_slot (&_dbus_gmain_connection_slot);
-  if (_dbus_gmain_connection_slot < 0)
+  G_LOCK (setup);
+
+  if (_dbus_gmain_connection_slot < 0 &&
+      !dbus_connection_allocate_data_slot (&_dbus_gmain_connection_slot))
     goto nomem;
 
   if (context == NULL)
@@ -551,7 +550,7 @@ set_up_connection, DBusConnection *connection,
   if (old_setup != NULL)
     {
       if (old_setup->context == context)
-        return; /* nothing to do */
+        goto done;
 
       cs = connection_setup_new_from_old (context, old_setup);
 
@@ -584,10 +583,14 @@ set_up_connection, DBusConnection *connection,
   dbus_connection_set_wakeup_main_function (connection,
 					    wakeup_main,
 					    cs, NULL);
+  g_source_attach (cs->message_queue_source, cs->context);
 
+ done:
+  G_UNLOCK (setup);
   return;
 
  nomem:
+  G_UNLOCK (setup);
   g_error ("Not enough memory to set up DBusConnection for use with GLib");
 }
 
@@ -612,11 +615,9 @@ set_up_server, DBusServer   *server,
   ConnectionSetup *old_setup;
   ConnectionSetup *cs;
 
-  /* FIXME we never free the slot, so its refcount just keeps growing,
-   * which is kind of broken.
-   */
-  dbus_server_allocate_data_slot (&server_slot);
-  if (server_slot < 0)
+  G_LOCK (setup);
+
+  if (server_slot < 0 && !dbus_server_allocate_data_slot (&server_slot))
     goto nomem;
 
   if (context == NULL)
@@ -628,7 +629,7 @@ set_up_server, DBusServer   *server,
   if (old_setup != NULL)
     {
       if (old_setup->context == context)
-        return; /* nothing to do */
+        goto done;
 
       cs = connection_setup_new_from_old (context, old_setup);
 
@@ -659,8 +660,11 @@ set_up_server, DBusServer   *server,
                                           cs, NULL))
     goto nomem;
 
+ done:
+  G_UNLOCK (setup);
   return;
 
  nomem:
+  G_UNLOCK (setup);
   g_error ("Not enough memory to set up DBusServer for use with GLib");
 }

@@ -30,11 +30,15 @@ import os
 import unittest
 import time
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import dbus
 import _dbus_bindings
+from _dbus_glib_bindings import setup_with_g_main
 import dbus.glib
 import dbus.service
+from dbus.mainloop import NULL_MAIN_LOOP
 import dbus_test_utils
 
 try:
@@ -66,6 +70,50 @@ logger.info('_dbus_bindings found at %r', _dbus_bindings.__file__)
 NAME = "org.freedesktop.DBus.TestSuitePythonService"
 IFACE = "org.freedesktop.DBus.TestSuiteInterface"
 OBJECT = "/org/freedesktop/DBus/TestSuitePythonObject"
+
+
+class TestGLibSetup(unittest.TestCase):
+    def test_concurrent_setup_can_dispatch_a_reply(self):
+        connection = dbus.SessionBus(private=True, mainloop=NULL_MAIN_LOOP)
+        ready = threading.Barrier(8)
+        loop = GLib.MainLoop()
+        replies = []
+        errors = []
+
+        def setup(_worker):
+            ready.wait(timeout=10)
+            setup_with_g_main(connection)
+
+        def replied(bus_id):
+            replies.append(bus_id)
+            loop.quit()
+
+        def failed(error):
+            errors.append(error)
+            loop.quit()
+
+        def timed_out():
+            loop.quit()
+            return GLib.SOURCE_REMOVE
+
+        try:
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(setup, range(8)))
+            pending = connection.call_async(
+                'org.freedesktop.DBus', '/org/freedesktop/DBus',
+                'org.freedesktop.DBus', 'GetId', '', (), replied, failed)
+            timer = GLib.timeout_add_seconds(5, timed_out)
+            try:
+                loop.run()
+                self.assertEqual(errors, [])
+                self.assertEqual(len(replies), 1)
+                self.assertTrue(pending.get_completed())
+            finally:
+                source = loop.get_context().find_source_by_id(timer)
+                if source is not None:
+                    source.destroy()
+        finally:
+            connection.close()
 
 
 class TestSignals(unittest.TestCase):
