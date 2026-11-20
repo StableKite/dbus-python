@@ -103,7 +103,7 @@ def uni(x):
 class TestConcurrentState(unittest.TestCase):
     @unittest.skipUnless(sysconfig.get_config_var('Py_GIL_DISABLED'),
                          'requires a free-threaded interpreter')
-    def test_core_import_preserves_free_threading(self):
+    def test_native_imports_and_glib_loop_preserve_free_threading(self):
         environment = dict(os.environ)
         environment.pop('PYTHON_GIL', None)
         subprocess.run([sys.executable, '-c', '''
@@ -111,6 +111,9 @@ import sys
 assert sys.flags.gil is None and not sys._is_gil_enabled()
 import _dbus_bindings
 import dbus
+assert not sys._is_gil_enabled()
+from dbus.mainloop.glib import DBusGMainLoop
+DBusGMainLoop(set_as_default=True)
 assert not sys._is_gil_enabled()
 '''], env=environment, check=True)
 

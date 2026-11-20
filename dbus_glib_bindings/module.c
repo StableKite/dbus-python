@@ -194,6 +194,12 @@ PyInit__dbus_glib_bindings(void)
     if (!(this_module = PyModule_Create(&moduledef))) {
         return NULL;
     }
+#ifdef Py_GIL_DISABLED
+    if (PyUnstable_Module_SetGIL(this_module, Py_MOD_GIL_NOT_USED) < 0) {
+        Py_DECREF(this_module);
+        return NULL;
+    }
+#endif
     return this_module;
 }
 
