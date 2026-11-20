@@ -33,6 +33,8 @@ override_dh_auto_configure-arch:
 			--builddirectory=build-$$x \
 			-- \
 			-Dpython=/usr/bin/python$$x \
+			-Dpython.platlibdir=/usr/lib/python3/dist-packages \
+			-Dpython.purelibdir=/usr/lib/python3/dist-packages \
 			-Ddoc=disabled \
 			-Dinstalled_tests=true \
 			-Dinstalled_tests_subdir=python$$x \
